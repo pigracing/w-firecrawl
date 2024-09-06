@@ -28,6 +28,7 @@ x-common-service: &common-service
     - HOST=${HOST:-0.0.0.0}
     - SELF_HOSTED_WEBHOOK_URL=${SELF_HOSTED_WEBHOOK_URL}
     - LOGGING_LEVEL=${LOGGING_LEVEL}
+    - TZ=${USE_TIME_ZONE}
   extra_hosts:
     - "host.docker.internal:host-gateway"
 
@@ -64,6 +65,8 @@ services:
     image: redis:alpine
     networks:
       - backend
+    environment:
+      - TZ=${USE_TIME_ZONE}
     command: redis-server --bind 0.0.0.0
 
 networks:
