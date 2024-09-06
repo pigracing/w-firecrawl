@@ -22,6 +22,7 @@ import { getScrapeQueue } from "../../services/queue-service";
 import { addScrapeJob } from "../../services/queue-jobs";
 import { Logger } from "../../lib/logger";
 import { getJobPriority } from "../../lib/job-priority";
+import { callWebhook } from "../../services/webhook";
 
 export async function crawlController(
   req: RequestWithAuth<{}, CrawlResponse, CrawlRequest>,
@@ -150,10 +151,16 @@ export async function crawlController(
     await addCrawlJob(id, job.id);
   }
 
+  if(req.body.webhook) {
+    await callWebhook(req.auth.team_id, id, null, req.body.webhook, true, "crawl.started");
+  }
+
+  const protocol = process.env.ENV === "local" ? req.protocol : "https";
+  
   return res.status(200).json({
     success: true,
     id,
-    url: `${req.protocol}://${req.get("host")}/v1/crawl/${id}`,
+    url: `${protocol}://${req.get("host")}/v1/crawl/${id}`,
   });
 }
 
