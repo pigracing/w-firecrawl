@@ -2,8 +2,7 @@ FROM node:20-slim AS base
 ENV PNPM_HOME="/pnpm"
 ENV PATH="$PNPM_HOME:$PATH"
 LABEL fly_launch_runtime="Node.js"
-#set TimeZone & COREPACK_NPM_REGISTRY for chinese user
-ENV TZ=Asia/Shanghai
+#set COREPACK_NPM_REGISTRY for chinese user
 ENV COREPACK_NPM_REGISTRY=https://registry.npmmirror.com
 RUN corepack enable
 COPY . /app
