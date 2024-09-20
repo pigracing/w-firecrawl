@@ -106,7 +106,7 @@ You should be able to see the Bull Queue Manager UI on `http://localhost:3002/ad
 If you’d like to test the crawl endpoint, you can run this:
 
   ```bash
-  curl -X POST http://localhost:3002/v0/crawl \
+  curl -X POST http://localhost:3002/v1/crawl \
       -H 'Content-Type: application/json' \
       -d '{
         "url": "https://mendable.ai"
@@ -176,4 +176,4 @@ By addressing these common issues, you can ensure a smoother setup and operation
 
 ## Install Firecrawl on a Kubernetes Cluster (Simple Version)
 
-Read the [examples/kubernetes-cluster-install/README.md](https://github.com/mendableai/firecrawl/blob/main/examples/kubernetes-cluster-install/README.md) for instructions on how to install Firecrawl on a Kubernetes Cluster.
+Read the [examples/kubernetes/cluster-install/README.md](https://github.com/mendableai/firecrawl/blob/main/examples/kubernetes/cluster-install/README.md) for instructions on how to install Firecrawl on a Kubernetes Cluster.
