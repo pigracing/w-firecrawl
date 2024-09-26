@@ -70,7 +70,7 @@ Check out the following resources to get started:
 - [x] [Zapier Integration](https://zapier.com/apps/firecrawl/integrations)
 - [x] [Cargo Integration](https://docs.getcargo.io/integration/firecrawl)
 - [x] [Pipedream Integration](https://pipedream.com/apps/firecrawl/)
-- [x] [Pabbly Integration](https://www.pabbly.com/connect/integrations/firecrawl/)
+- [x] [Pabbly Connect Integration](https://www.pabbly.com/connect/integrations/firecrawl/)
 - [ ] Want an SDK or Integration? Let us know by opening an issue.
 
 To run locally, refer to guide [here](https://github.com/mendableai/firecrawl/blob/main/CONTRIBUTING.md).
@@ -315,6 +315,34 @@ curl -X POST https://api.firecrawl.dev/v1/scrape \
       "extract": {
         "prompt": "Extract the company mission from the page."
       }
+    }'
+```
+
+### Intracting with the page with Actions (Cloud-only)
+
+Firecrawl allows you to perform various actions on a web page before scraping its content. This is particularly useful for interacting with dynamic content, navigating through pages, or accessing content that requires user interaction.
+
+Here is an example of how to use actions to navigate to google.com, search for Firecrawl, click on the first result, and take a screenshot.
+
+```bash
+curl -X POST https://api.firecrawl.dev/v1/scrape \
+    -H 'Content-Type: application/json' \
+    -H 'Authorization: Bearer YOUR_API_KEY' \
+    -d '{
+        "url": "google.com",
+        "formats": ["markdown"],
+        "actions": [
+            {"type": "wait", "milliseconds": 2000},
+            {"type": "click", "selector": "textarea[title=\"Search\"]"},
+            {"type": "wait", "milliseconds": 2000},
+            {"type": "write", "text": "firecrawl"},
+            {"type": "wait", "milliseconds": 2000},
+            {"type": "press", "key": "ENTER"},
+            {"type": "wait", "milliseconds": 3000},
+            {"type": "click", "selector": "h3"},
+            {"type": "wait", "milliseconds": 3000},
+            {"type": "screenshot"}
+        ]
     }'
 ```
 
