@@ -44,6 +44,7 @@ x-common-env: &common-env
   SEARXNG_ENDPOINT: ${SEARXNG_ENDPOINT}
   SEARXNG_ENGINES: ${SEARXNG_ENGINES}
   SEARXNG_CATEGORIES: ${SEARXNG_CATEGORIES}
+  TZ: 'Asia/Shanghai'
 
 services:
   playwright-service:
