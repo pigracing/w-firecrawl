@@ -5,6 +5,7 @@ import {
   mapRequestSchema,
   RequestWithAuth,
   scrapeOptions,
+  TeamFlags,
   TimeoutSignal,
 } from "./types";
 import { crawlToCrawler, StoredCrawl } from "../../lib/crawl-redis";
@@ -50,13 +51,13 @@ export async function getMapResults({
   includeSubdomains = true,
   crawlerOptions = {},
   teamId,
-  plan,
   origin,
   includeMetadata = false,
   allowExternalLinks,
   abort = new AbortController().signal, // noop
   mock,
   filterByPath = true,
+  flags,
 }: {
   url: string;
   search?: string;
@@ -65,13 +66,13 @@ export async function getMapResults({
   includeSubdomains?: boolean;
   crawlerOptions?: any;
   teamId: string;
-  plan?: string;
   origin?: string;
   includeMetadata?: boolean;
   allowExternalLinks?: boolean;
   abort?: AbortSignal;
   mock?: string;
   filterByPath?: boolean;
+  flags: TeamFlags;
 }): Promise<MapResult> {
   const id = uuidv4();
   let links: string[] = [url];
@@ -85,13 +86,12 @@ export async function getMapResults({
       scrapeOptions: undefined,
     },
     scrapeOptions: scrapeOptions.parse({}),
-    internalOptions: {},
+    internalOptions: { teamId },
     team_id: teamId,
     createdAt: Date.now(),
-    plan: plan,
   };
 
-  const crawler = crawlToCrawler(id, sc);
+  const crawler = crawlToCrawler(id, sc, flags);
 
   try {
     sc.robots = await crawler.getRobotsTxt(false, abort);
@@ -322,10 +322,10 @@ export async function mapController(
         crawlerOptions: req.body,
         origin: req.body.origin,
         teamId: req.auth.team_id,
-        plan: req.auth.plan,
         abort: abort.signal,
         mock: req.body.useMock,
         filterByPath: req.body.filterByPath !== false,
+        flags: req.acuc.flags ?? null,
       }),
       ...(req.body.timeout !== undefined ? [
         new Promise((resolve, reject) => setTimeout(() => {

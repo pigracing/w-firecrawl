@@ -6,6 +6,7 @@ import { crawlStatusController } from "../controllers/v1/crawl-status";
 import { mapController } from "../controllers/v1/map";
 import {
   ErrorResponse,
+  isAgentExtractModelValid,
   RequestWithACUC,
   RequestWithAuth,
   RequestWithMaybeAuth,
@@ -93,6 +94,14 @@ export function authMiddleware(
 ): (req: RequestWithMaybeAuth, res: Response, next: NextFunction) => void {
   return (req, res, next) => {
     (async () => {
+      if (rateLimiterMode === RateLimiterMode.Extract && isAgentExtractModelValid((req.body as any)?.agent?.model)) {
+        rateLimiterMode = RateLimiterMode.ExtractAgentPreview;
+      }
+
+      // if (rateLimiterMode === RateLimiterMode.Scrape && isAgentExtractModelValid((req.body as any)?.agent?.model)) {
+      //   rateLimiterMode = RateLimiterMode.ScrapeAgentPreview;
+      // }
+
       const auth = await authenticateUser(req, res, rateLimiterMode);
 
       if (!auth.success) {
@@ -105,9 +114,9 @@ export function authMiddleware(
         }
       }
 
-      const { team_id, plan, chunk } = auth;
+      const { team_id, chunk } = auth;
 
-      req.auth = { team_id, plan };
+      req.auth = { team_id };
       req.acuc = chunk ?? undefined;
       if (chunk) {
         req.account = { remainingCredits: chunk.remaining_credits };
@@ -138,8 +147,8 @@ function idempotencyMiddleware(
   })().catch((err) => next(err));
 }
 
-function blocklistMiddleware(req: Request, res: Response, next: NextFunction) {
-  if (typeof req.body.url === "string" && isUrlBlocked(req.body.url)) {
+function blocklistMiddleware(req: RequestWithACUC<any, any, any>, res: Response, next: NextFunction) {
+  if (typeof req.body.url === "string" && isUrlBlocked(req.body.url, req.acuc?.flags ?? null)) {
     if (!res.headersSent) {
       return res.status(403).json({
         success: false,
@@ -257,26 +266,27 @@ v1Router.get(
 
 v1Router.post(
   "/llmstxt",
-  authMiddleware(RateLimiterMode.Extract),
+  authMiddleware(RateLimiterMode.Scrape),
+  blocklistMiddleware,
   wrap(generateLLMsTextController),
 );
 
 v1Router.get(
   "/llmstxt/:jobId",
-  authMiddleware(RateLimiterMode.ExtractStatus),
+  authMiddleware(RateLimiterMode.CrawlStatus),
   wrap(generateLLMsTextStatusController),
 );
 
 v1Router.post(
   "/deep-research",
-  authMiddleware(RateLimiterMode.Extract),
+  authMiddleware(RateLimiterMode.Crawl),
   checkCreditsMiddleware(1),
   wrap(deepResearchController),
 );
 
 v1Router.get(
   "/deep-research/:jobId",
-  authMiddleware(RateLimiterMode.ExtractStatus),
+  authMiddleware(RateLimiterMode.CrawlStatus),
   wrap(deepResearchStatusController),
 );
 
@@ -284,6 +294,12 @@ v1Router.get(
 
 v1Router.delete(
   "/crawl/:jobId",
+  authMiddleware(RateLimiterMode.CrawlStatus),
+  crawlCancelController,
+);
+
+v1Router.delete(
+  "/batch/scrape/:jobId",
   authMiddleware(RateLimiterMode.CrawlStatus),
   crawlCancelController,
 );

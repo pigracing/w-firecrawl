@@ -3,7 +3,6 @@ import { updateGeneratedLlmsTxt } from "./generate-llmstxt-redis";
 import { getMapResults } from "../../controllers/v1/map";
 import { z } from "zod";
 import { scrapeDocument } from "../extract/document-scraper";
-import { PlanType } from "../../types";
 import {
   getLlmsTextFromCache,
   saveLlmsTextToCache,
@@ -12,11 +11,11 @@ import { billTeam } from "../../services/billing/credit_billing";
 import { logJob } from "../../services/logging/log_job";
 import { getModel } from "../generic-ai";
 import { generateCompletions } from "../../scraper/scrapeURL/transformers/llmExtract";
-
+import { CostTracking } from "../extract/extraction-service";
+import { getACUCTeam } from "../../controllers/auth";
 interface GenerateLLMsTextServiceOptions {
   generationId: string;
   teamId: string;
-  plan: PlanType;
   url: string;
   maxUrls: number;
   showFullText: boolean;
@@ -64,7 +63,7 @@ function limitLlmsTxtEntries(llmstxt: string, maxEntries: number): string {
 export async function performGenerateLlmsTxt(
   options: GenerateLLMsTextServiceOptions,
 ) {
-  const { generationId, teamId, plan, url, maxUrls = 100, showFullText, subId } =
+  const { generationId, teamId, url, maxUrls = 100, showFullText, subId } =
     options;
   const startTime = Date.now();
   const logger = _logger.child({
@@ -73,6 +72,8 @@ export async function performGenerateLlmsTxt(
     generationId,
     teamId,
   });
+  const costTracking = new CostTracking();
+  const acuc = await getACUCTeam(teamId);
 
   try {
     // Enforce max URL limit
@@ -113,11 +114,11 @@ export async function performGenerateLlmsTxt(
     const mapResult = await getMapResults({
       url,
       teamId,
-      plan,
       limit: effectiveMaxUrls,
       includeSubdomains: false,
       ignoreSitemap: false,
       includeMetadata: true,
+      flags: acuc?.flags ?? null,
     });
 
     if (!mapResult || !mapResult.links) {
@@ -142,7 +143,6 @@ export async function performGenerateLlmsTxt(
               {
                 url,
                 teamId,
-                plan,
                 origin: url,
                 timeout: 30000,
                 isSingleUrl: true,
@@ -163,7 +163,7 @@ export async function performGenerateLlmsTxt(
 
             const { extract } = await generateCompletions({
               logger,
-              model: getModel("gpt-4o-mini"),
+              model: getModel("gpt-4o-mini", "openai"),
               options: {
                 systemPrompt: "",
                 mode: "llm",
@@ -171,6 +171,13 @@ export async function performGenerateLlmsTxt(
                 prompt: `Generate a 9-10 word description and a 3-4 word title of the entire page based on ALL the content one will find on the page for this url: ${document.metadata?.url}. This will help in a user finding the page for its intended purpose.`,
               },
               markdown: document.markdown,
+              costTrackingOptions: {
+                costTracking,
+                metadata: {
+                  module: "generate-llmstxt",
+                  method: "generateDescription",
+                },
+              },
             });
 
             return {
@@ -233,6 +240,7 @@ export async function performGenerateLlmsTxt(
       num_tokens: 0,
       tokens_billed: 0,
       sources: {},
+      cost_tracking: costTracking,
     });
 
     // Bill team for usage
