@@ -7,6 +7,7 @@ import {
   ActionError,
   EngineError,
   SiteError,
+  SSLError,
   UnsupportedFileError,
 } from "../../error";
 import { MockState } from "../../lib/mock";
@@ -141,6 +142,7 @@ export async function fireEngineCheckStatus(
             : {}),
         },
         mock,
+        abort,
       });
     },
   );
@@ -169,7 +171,13 @@ export async function fireEngineCheckStatus(
       typeof status.error === "string" &&
       status.error.includes("Chrome error: ")
     ) {
-      throw new SiteError(status.error.split("Chrome error: ")[1]);
+      const code = status.error.split("Chrome error: ")[1];
+
+      if (code.includes("ERR_CERT_") || code.includes("ERR_SSL_") || code.includes("ERR_BAD_SSL_")) {
+        throw new SSLError();
+      } else {
+        throw new SiteError(code);
+      }
     } else if (
       typeof status.error === "string" &&
       status.error.includes("File size exceeds")
