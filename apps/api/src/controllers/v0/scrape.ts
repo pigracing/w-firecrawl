@@ -21,7 +21,8 @@ import {
   defaultOrigin,
 } from "../../lib/default-values";
 import { addScrapeJob, waitForJob } from "../../services/queue-jobs";
-import { getScrapeQueue, redisConnection } from "../../services/queue-service";
+import { getScrapeQueue } from "../../services/queue-service";
+import { redisEvictConnection } from "../../../src/services/redis";
 import { v4 as uuidv4 } from "uuid";
 import { logger } from "../../lib/logger";
 import * as Sentry from "@sentry/node";
@@ -80,7 +81,10 @@ export async function scrapeHelper(
       scrapeOptions,
       internalOptions,
       origin: req.body.origin ?? defaultOrigin,
+      integration: req.body.integration,
       is_scrape: true,
+      startTime: Date.now(),
+      zeroDataRetention: false, // not supported on v0
     },
     {},
     jobId,
@@ -184,7 +188,11 @@ export async function scrapeController(req: Request, res: Response) {
 
     const { team_id, chunk } = auth;
 
-    redisConnection.sadd("teams_using_v0", team_id)
+    if (chunk?.flags?.forceZDR) {
+      return res.status(400).json({ error: "Your team has zero data retention enabled. This is not supported on the v0 API. Please update your code to use the v1 API." });
+    }
+
+    redisEvictConnection.sadd("teams_using_v0", team_id)
       .catch(error => logger.error("Failed to add team to teams_using_v0", { error, team_id }));
 
     const crawlerOptions = req.body.crawlerOptions ?? {};

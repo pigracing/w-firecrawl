@@ -4,18 +4,14 @@ on:
   pull_request:
     branches:
       - main
-    paths:
-      - apps/api/**
-      - apps/playwright-service-ts/**
 
 env:
-  PORT: 3002
   REDIS_URL: redis://localhost:6379
-  HOST: 0.0.0.0
   ENV: ${{ secrets.ENV }}
   TEST_SUITE_SELF_HOSTED: true
   USE_GO_MARKDOWN_PARSER: true
   FIRECRAWL_DEBUG_FILTER_LINKS: true
+  SENTRY_ENVIRONMENT: dev
 
 jobs:
   test:
@@ -66,7 +62,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.19'
+          go-version: '1.24'
           cache-dependency-path: ./apps/api/sharedLibs/go-html-to-md/go.sum
       - name: Set up Rust
         uses: actions-rust-lang/setup-rust-toolchain@v1
@@ -101,10 +97,16 @@ jobs:
           pnpx wait-on tcp:3434 -t 30s
         working-directory: ./
       - name: Start server
-        run: npm start > api.log 2>&1 &
+        run: npm run start:production > api.log 2>&1 &
+        env:
+          PORT: 3002
+          HOST: 0.0.0.0
         working-directory: ./apps/api
       - name: Start worker
         run: npm run workers > worker.log 2>&1 &
+        env:
+          PORT: 3005
+          HOST: 0.0.0.0
         working-directory: ./apps/api
       - name: Start playwright
         if: matrix.engine == 'playwright'
@@ -113,7 +115,7 @@ jobs:
         env:
           PORT: 3003
       - name: Wait for server
-        run: pnpx wait-on tcp:3002 -t 15s
+        run: pnpx wait-on tcp:3002 -t 60s
       - name: Wait for playwright
         if: matrix.engine == 'playwright'
         run: pnpx wait-on tcp:3003 -t 15s
@@ -127,7 +129,7 @@ jobs:
       - name: Kill SearXNG
         if: always() && matrix.search == 'searxng'
         run: |
-          docker logs searxng > searxng/searxng.log 2>&1
+          docker logs searxng > searxng.log 2>&1
           docker kill searxng
         working-directory: ./
       - uses: actions/upload-artifact@v4
@@ -148,5 +150,4 @@ jobs:
         with:
           name: SearXNG (${{ matrix.ai }}, ${{ matrix.engine }}, ${{ matrix.proxy }})
           path: |
-            ./searxng/searxng.log
-            ./searxng/settings.yml
+            ./searxng.log

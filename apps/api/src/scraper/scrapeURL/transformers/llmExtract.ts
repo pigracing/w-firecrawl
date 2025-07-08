@@ -200,8 +200,7 @@ export function calculateCost(
   let modelCost = modelCosts[model] || { input_cost: 0, output_cost: 0 };
   //gemini-2.5-pro-exp-03-25 pricing
   if (
-    model === "gemini-2.5-pro-exp-03-25" ||
-    model === "gemini-2.5-pro-preview-03-25"
+    model.includes("gemini-2.5-pro")
   ) {
     let inputCost = 0;
     let outputCost = 0;
@@ -654,6 +653,11 @@ export async function performLLMExtract(
   document: Document,
 ): Promise<Document> {
   if (meta.options.formats.includes("extract")) {
+    if (meta.internalOptions.zeroDataRetention) {
+      document.warning = "JSON mode is not supported with zero data retention." + (document.warning ? " " + document.warning : "")
+      return document;
+    }
+
     // const originalOptions = meta.options.extract!;
 
     // let generationOptions = { ...originalOptions }; // Start with original options
@@ -685,7 +689,7 @@ export async function performLLMExtract(
     const { extractedDataArray, warning, costLimitExceededTokenUsage } =
       await extractData({
         extractOptions: generationOptions,
-        urls: [meta.url],
+        urls: [meta.rewrittenUrl ?? meta.url],
         useAgent: false,
         scrapeId: meta.id,
       });
@@ -761,7 +765,7 @@ export async function performLLMExtract(
     //   // if (shouldUseSmartscrape && smartscrape_prompt) {
     //   //   meta.logger.info("Triggering SmartScrape refinement...", { reason: smartscrape_reasoning, prompt: smartscrape_prompt });
     //   //   // Call the smartScrape function (which needs to be implemented/imported)
-    //   //   // const smartScrapedDocs = await smartScrape(meta.url, smartscrape_prompt);
+    //   //   // const smartScrapedDocs = await smartScrape(meta.rewrittenUrl ?? meta.url, smartscrape_prompt);
     //   //   // Process/merge smartScrapedDocs with extractedData
     //   //   // ... potentially update finalExtract ...
     //   // } else {

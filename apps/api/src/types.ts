@@ -10,7 +10,7 @@ import { ExtractorOptions, Document } from "./lib/entities";
 import { InternalOptions } from "./scraper/scrapeURL";
 import type { CostTracking } from "./lib/extract/extraction-service";
 
-type Mode = "crawl" | "single_urls" | "sitemap";
+type Mode = "crawl" | "single_urls" | "sitemap" | "kickoff";
 
 export { Mode };
 
@@ -44,9 +44,21 @@ export interface WebScraperOptions {
   sitemapped?: boolean;
   webhook?: z.infer<typeof webhookSchema>;
   v1?: boolean;
+  integration?: string | null;
+
+  /**
+   * Disables billing on the worker side.
+   */
   is_scrape?: boolean;
+
   isCrawlSourceScrape?: boolean;
   from_extract?: boolean;
+  startTime?: number;
+
+  zeroDataRetention: boolean;
+  sentry?: any;
+  is_extract?: boolean;
+  concurrencyLimited?: boolean;
 }
 
 export interface RunWebScraperParams {
@@ -88,6 +100,7 @@ export interface FirecrawlJob {
   crawlerOptions?: any;
   scrapeOptions?: any;
   origin: string;
+  integration?: string | null;
   num_tokens?: number;
   retry?: boolean;
   crawl_id?: string;
@@ -95,6 +108,11 @@ export interface FirecrawlJob {
   sources?: Record<string, string[]>;
   cost_tracking?: CostTracking;
   pdf_num_pages?: number;
+  credits_billed?: number | null;
+  change_tracking_tag?: string | null;
+  dr_clean_by?: string | null;
+
+  zeroDataRetention: boolean;
 }
 
 export interface FirecrawlScrapeResponse {

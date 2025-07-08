@@ -12,7 +12,7 @@ export async function extractMetadataRust(
   return {
     ...fromRust,
     ...(fromRust.favicon ? {
-      favicon: new URL(fromRust.favicon, meta.url)
+      favicon: new URL(fromRust.favicon, meta.rewrittenUrl ?? meta.url)
     } : {}),
     scrapeId: meta.id,
   };
@@ -75,7 +75,7 @@ export async function extractMetadata(
       soup('link[rel*="icon"]').first().attr("href") ||
       undefined;
     if (faviconLink) {
-      const baseUrl = new URL(meta.url).origin;
+      const baseUrl = new URL(meta.rewrittenUrl ?? meta.url).origin;
       favicon = faviconLink.startsWith("http")
         ? faviconLink
         : `${baseUrl}${faviconLink}`;
@@ -133,7 +133,7 @@ export async function extractMetadata(
       // Extract all meta tags for custom metadata
       soup("meta").each((i, elem) => {
         try {
-          const name = soup(elem).attr("name") || soup(elem).attr("property");
+          const name = soup(elem).attr("name") || soup(elem).attr("property") || soup(elem).attr("itemprop");
           const content = soup(elem).attr("content");
 
           if (name && content) {

@@ -40,15 +40,20 @@ export async function scrapeDocument(
         url: options.url,
         mode: "single_urls",
         team_id: options.teamId,
-        scrapeOptions: scrapeOptions.parse({ ...internalScrapeOptions }),
+        scrapeOptions: scrapeOptions.parse({
+          ...internalScrapeOptions,
+          maxAge: 4 * 60 * 60 * 1000,
+        }),
         internalOptions: {
-          useCache: true,
           teamId: options.teamId,
           saveScrapeResultToGCS: process.env.GCS_FIRE_ENGINE_BUCKET_NAME ? true : false,
+          bypassBilling: true,
         },
         origin: options.origin,
         is_scrape: true,
         from_extract: true,
+        startTime: Date.now(),
+        zeroDataRetention: false, // not supported
       },
       {},
       jobId,

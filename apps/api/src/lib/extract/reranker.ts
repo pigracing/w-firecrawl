@@ -4,7 +4,6 @@ import { isUrlBlocked } from "../../scraper/WebScraper/utils/blocklist";
 import { logger } from "../logger";
 import { CohereClient } from "cohere-ai";
 import { extractConfig } from "./config";
-import { searchSimilarPages } from "./index/pinecone";
 import { generateCompletions } from "../../scraper/scrapeURL/transformers/llmExtract";
 import { buildRerankerUserPrompt } from "./build-prompts";
 import { buildRerankerSystemPrompt } from "./build-prompts";
@@ -299,8 +298,8 @@ export async function rerankLinksWithLLM(
           let completion: any;
           try {
             const completionPromise = generateCompletions({
-              model: getModel("gemini-2.5-pro-preview-03-25", "vertex"),
-              retryModel: getModel("gemini-2.5-pro-preview-03-25", "google"),
+              model: getModel("gemini-2.5-pro", "vertex"),
+              retryModel: getModel("gemini-2.5-pro", "google"),
               logger: logger.child({
                 method: "rerankLinksWithLLM",
                 chunk: chunkIndex + 1,

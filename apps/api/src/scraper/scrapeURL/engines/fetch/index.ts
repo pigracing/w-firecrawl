@@ -17,7 +17,7 @@ export async function scrapeURLWithFetch(
   const timeout = timeToRun ?? 300000;
 
   const mockOptions = {
-    url: meta.url,
+    url: meta.rewrittenUrl ?? meta.url,
 
     // irrelevant
     method: "GET",
@@ -30,7 +30,7 @@ export async function scrapeURLWithFetch(
     url: string;
     body: string,
     status: number;
-    headers: any;
+    headers: [string, string][];
   };
 
   if (meta.mock !== null) {
@@ -55,8 +55,8 @@ export async function scrapeURLWithFetch(
   } else {
     try {
       const x = await Promise.race([
-        undici.fetch(meta.url, {
-          dispatcher: await makeSecureDispatcher(meta.url),
+        undici.fetch(meta.rewrittenUrl ?? meta.url, {
+          dispatcher: await makeSecureDispatcher(meta.rewrittenUrl ?? meta.url),
           redirect: "follow",
           headers: meta.options.headers,
           signal: meta.internalOptions.abort ?? AbortSignal.timeout(timeout),
@@ -117,5 +117,10 @@ export async function scrapeURLWithFetch(
     url: response.url,
     html: response.body,
     statusCode: response.status,
+    contentType: (response.headers.find(
+      (x) => x[0].toLowerCase() === "content-type",
+    ) ?? [])[1] ?? undefined,
+
+    proxyUsed: "basic",
   };
 }

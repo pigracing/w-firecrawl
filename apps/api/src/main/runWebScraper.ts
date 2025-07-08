@@ -15,7 +15,6 @@ import {
   ScrapeUrlResponse,
 } from "../scraper/scrapeURL";
 import { Engine } from "../scraper/scrapeURL/engines";
-import { indexPage } from "../lib/extract/index/pinecone";
 import { CostTracking } from "../lib/extract/extraction-service";
 configDotenv();
 
@@ -78,6 +77,7 @@ export async function runWebScraper({
     module: "runWebscraper",
     scrapeId: bull_job_id,
     jobId: bull_job_id,
+    zeroDataRetention: internalOptions?.zeroDataRetention,
   });
   const tries = is_crawl ? 3 : 1;
 

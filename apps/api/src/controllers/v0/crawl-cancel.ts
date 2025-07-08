@@ -6,7 +6,7 @@ import { logger } from "../../../src/lib/logger";
 import { getCrawl, saveCrawl } from "../../../src/lib/crawl-redis";
 import * as Sentry from "@sentry/node";
 import { configDotenv } from "dotenv";
-import { redisConnection } from "../../services/queue-service";
+import { redisEvictConnection } from "../../../src/services/redis";
 configDotenv();
 
 export async function crawlCancelController(req: Request, res: Response) {
@@ -20,7 +20,11 @@ export async function crawlCancelController(req: Request, res: Response) {
 
     const { team_id } = auth;
 
-    redisConnection.sadd("teams_using_v0", team_id)
+    if (auth.chunk?.flags?.forceZDR) {
+      return res.status(400).json({ error: "Your team has zero data retention enabled. This is not supported on the v0 API. Please update your code to use the v1 API." });
+    }
+
+    redisEvictConnection.sadd("teams_using_v0", team_id)
       .catch(error => logger.error("Failed to add team to teams_using_v0", { error, team_id }));
 
     const sc = await getCrawl(req.params.jobId);

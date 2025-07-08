@@ -60,24 +60,6 @@ export function getExtractQueue() {
   return extractQueue;
 }
 
-export function getIndexQueue() {
-  if (!indexQueue) {
-    indexQueue = new Queue(indexQueueName, {
-      connection: redisConnection,
-      defaultJobOptions: {
-        removeOnComplete: {
-          age: 90000, // 25 hours
-        },
-        removeOnFail: {
-          age: 90000, // 25 hours
-        },
-      },
-    });
-    logger.info("Index queue created");
-  }
-  return indexQueue;
-}
-
 export function getGenerateLlmsTxtQueue() {
   if (!generateLlmsTxtQueue) {
     generateLlmsTxtQueue = new Queue(generateLlmsTxtQueueName, {
@@ -120,10 +102,10 @@ export function getBillingQueue() {
       connection: redisConnection,
       defaultJobOptions: {
         removeOnComplete: {
-          age: 90000, // 25 hours
+          age: 3600, // 1 hour
         },
         removeOnFail: {
-          age: 90000, // 25 hours
+          age: 3600, // 1 hour
         },
       },
     });
@@ -131,7 +113,3 @@ export function getBillingQueue() {
   }
   return billingQueue;
 }
-
-// === REMOVED IN FAVOR OF POLLING -- NOT RELIABLE
-// import { QueueEvents } from 'bullmq';
-// export const scrapeQueueEvents = new QueueEvents(scrapeQueueName, { connection: redisConnection.duplicate() });

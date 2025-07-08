@@ -39,14 +39,19 @@ export async function scrapeDocument_F0(
         url: options.url,
         mode: "single_urls",
         team_id: options.teamId,
-        scrapeOptions: scrapeOptions.parse({ ...internalScrapeOptions }),
+        scrapeOptions: scrapeOptions.parse({
+          ...internalScrapeOptions,
+          maxAge: 4 * 60 * 60 * 1000,
+        }),
         internalOptions: {
-          useCache: true,
           teamId: options.teamId,
+          bypassBilling: true,
         },
         origin: options.origin,
         is_scrape: true,
         from_extract: true,
+        startTime: Date.now(),
+        zeroDataRetention: false, // not supported
       },
       {},
       jobId,

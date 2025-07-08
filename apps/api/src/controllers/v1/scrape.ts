@@ -1,5 +1,5 @@
 import { Response } from "express";
-import { logger } from "../../lib/logger";
+import { logger as _logger } from "../../lib/logger";
 import {
   Document,
   RequestWithAuth,
@@ -7,12 +7,10 @@ import {
   scrapeRequestSchema,
   ScrapeResponse,
 } from "./types";
-import { billTeam } from "../../services/billing/credit_billing";
 import { v4 as uuidv4 } from "uuid";
 import { addScrapeJob, waitForJob } from "../../services/queue-jobs";
 import { getJobPriority } from "../../lib/job-priority";
 import { getScrapeQueue } from "../../services/queue-service";
-import { supabaseGetJobById } from "../../lib/supabase-jobs";
 
 export async function scrapeController(
   req: RequestWithAuth<{}, ScrapeResponse, ScrapeRequest>,
@@ -20,17 +18,33 @@ export async function scrapeController(
 ) {
   const jobId = uuidv4();
   const preNormalizedBody = { ...req.body };
+
+  if (req.body.zeroDataRetention && !req.acuc?.flags?.allowZDR) {
+    return res.status(400).json({
+      success: false,
+      error: "Zero data retention is enabled for this team. If you're interested in ZDR, please contact support@firecrawl.com",
+    });
+  }
+
+  const zeroDataRetention = req.acuc?.flags?.forceZDR || req.body.zeroDataRetention;
+
+  const logger = _logger.child({
+    method: "scrapeController",
+    jobId,
+    scrapeId: jobId,
+    teamId: req.auth.team_id,
+    team_id: req.auth.team_id,
+    zeroDataRetention,
+  });
  
   logger.debug("Scrape " + jobId + " starting", {
     scrapeId: jobId,
     request: req.body,
     originalRequest: preNormalizedBody,
-    teamId: req.auth.team_id,
     account: req.account,
   });
 
   req.body = scrapeRequestSchema.parse(req.body);
-  let earlyReturn = false;
 
   const origin = req.body.origin;
   const timeout = req.body.timeout;
@@ -40,24 +54,36 @@ export async function scrapeController(
     team_id: req.auth.team_id,
     basePriority: 10,
   });
-  // 
 
+  const isDirectToBullMQ = process.env.SEARCH_PREVIEW_TOKEN !== undefined && process.env.SEARCH_PREVIEW_TOKEN === req.body.__searchPreviewToken;
+  
   await addScrapeJob(
     {
       url: req.body.url,
       mode: "single_urls",
       team_id: req.auth.team_id,
-      scrapeOptions: req.body,
+      scrapeOptions: {
+        ...req.body,
+        ...(req.body.__experimental_cache ? {
+          maxAge: req.body.maxAge ?? 4 * 60 * 60 * 1000, // 4 hours
+        } : {}),
+      },
       internalOptions: {
         teamId: req.auth.team_id,
         saveScrapeResultToGCS: process.env.GCS_FIRE_ENGINE_BUCKET_NAME ? true : false,
+        unnormalizedSourceURL: preNormalizedBody.url,
+        bypassBilling: isDirectToBullMQ,
+        zeroDataRetention,
       },
-      origin: req.body.origin,
-      is_scrape: true,
+      origin,
+      integration: req.body.integration,
+      startTime,
+      zeroDataRetention,
     },
     {},
     jobId,
     jobPriority,
+    isDirectToBullMQ,
   );
 
   const totalWait =
@@ -71,38 +97,12 @@ export async function scrapeController(
   try {
     doc = await waitForJob(jobId, timeout + totalWait);
   } catch (e) {
-    logger.error(`Error in scrapeController: ${e}`, {
-      jobId,
-      scrapeId: jobId,
+    logger.error(`Error in scrapeController`, {
       startTime,
     });
-    
-    let creditsToBeBilled = 0;
 
-    if (req.body.agent?.model?.toLowerCase() === "fire-1" || req.body.extract?.agent?.model?.toLowerCase() === "fire-1" || req.body.jsonOptions?.agent?.model?.toLowerCase() === "fire-1") {
-      if (process.env.USE_DB_AUTHENTICATION === "true") {
-        // @Nick this is a hack pushed at 2AM pls help - mogery
-        const job = await supabaseGetJobById(jobId);
-        if (!job?.cost_tracking) {
-          logger.warn("No cost tracking found for job", {
-            jobId,
-          });
-        }
-        creditsToBeBilled = Math.ceil((job?.cost_tracking?.totalCost ?? 1) * 1800);
-      } else {
-        creditsToBeBilled = 150;
-      }
-    }
-  
-    if (creditsToBeBilled > 0) {
-      billTeam(req.auth.team_id, req.acuc?.sub_id, creditsToBeBilled).catch(
-        (error) => {
-          logger.error(
-            `Failed to bill team ${req.auth.team_id} for ${creditsToBeBilled} credits: ${error}`,
-          );
-          // Optionally, you could notify an admin or add to a retry queue here
-        },
-      );
+    if (zeroDataRetention) {
+      await getScrapeQueue().remove(jobId);
     }
 
     if (
@@ -122,52 +122,7 @@ export async function scrapeController(
   }
 
   await getScrapeQueue().remove(jobId);
-
-  const endTime = new Date().getTime();
-  const timeTakenInSeconds = (endTime - startTime) / 1000;
-  const numTokens =
-    doc && doc.extract
-      ? // ? numTokensFromString(doc.markdown, "gpt-3.5-turbo")
-        0 // TODO: fix
-      : 0;
-
-  let creditsToBeBilled = 1; // Assuming 1 credit per document
-  if (earlyReturn) {
-    // Don't bill if we're early returning
-    return;
-  }
-  if ((req.body.extract && req.body.formats?.includes("extract")) || (req.body.formats?.includes("changeTracking") && req.body.changeTrackingOptions?.modes?.includes("json"))) {
-    creditsToBeBilled = 5;
-  }
-
-  if (req.body.agent?.model?.toLowerCase() === "fire-1" || req.body.extract?.agent?.model?.toLowerCase() === "fire-1" || req.body.jsonOptions?.agent?.model?.toLowerCase() === "fire-1") {
-    if (process.env.USE_DB_AUTHENTICATION === "true") {
-      // @Nick this is a hack pushed at 2AM pls help - mogery
-      const job = await supabaseGetJobById(jobId);
-      if (!job?.cost_tracking) {
-        logger.warn("No cost tracking found for job", {
-          jobId,
-        });
-      }
-      creditsToBeBilled = Math.ceil((job?.cost_tracking?.totalCost ?? 1) * 1800);
-    } else {
-      creditsToBeBilled = 150;
-    }
-  }
-
-  if (doc?.metadata?.proxyUsed === "stealth") {
-    creditsToBeBilled += 4;
-  }
-
-  billTeam(req.auth.team_id, req.acuc?.sub_id, creditsToBeBilled).catch(
-    (error) => {
-      logger.error(
-        `Failed to bill team ${req.auth.team_id} for ${creditsToBeBilled} credits: ${error}`,
-      );
-      // Optionally, you could notify an admin or add to a retry queue here
-    },
-  );
-
+  
   if (!req.body.formats.includes("rawHtml")) {
     if (doc && doc.rawHtml) {
       delete doc.rawHtml;
