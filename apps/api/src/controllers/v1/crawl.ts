@@ -8,7 +8,6 @@ import {
   toLegacyCrawlerOptions,
 } from "./types";
 import { crawlToCrawler, saveCrawl, StoredCrawl } from "../../lib/crawl-redis";
-import { logCrawl } from "../../services/logging/crawl_log";
 import { _addScrapeJobToBullMQ } from "../../services/queue-jobs";
 import { logger as _logger } from "../../lib/logger";
 
@@ -42,8 +41,6 @@ export async function crawlController(
     originalRequest: preNormalizedBody,
     account: req.account,
   });
-
-  await logCrawl(id, req.auth.team_id);
 
   let { remainingCredits } = req.account!;
   const useDbAuthentication = process.env.USE_DB_AUTHENTICATION === "true";
@@ -99,7 +96,7 @@ export async function crawlController(
     }, // NOTE: smart wait disabled for crawls to ensure contentful scrape, speed does not matter
     team_id: req.auth.team_id,
     createdAt: Date.now(),
-    maxConcurrency: req.body.maxConcurrency !== undefined ? Math.min(req.body.maxConcurrency, req.acuc.concurrency) : undefined,
+    maxConcurrency: req.body.maxConcurrency !== undefined ? (req.acuc?.concurrency !== undefined ? Math.min(req.body.maxConcurrency, req.acuc.concurrency) : req.body.maxConcurrency) : undefined,
     zeroDataRetention,
   };
 

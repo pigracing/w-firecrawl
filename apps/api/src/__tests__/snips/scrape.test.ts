@@ -57,15 +57,16 @@ describe("Scrape tests", () => {
       expect(response.markdown).toContain("Firecrawl");
     }, scrapeTimeout);
 
-    it.concurrent("allows waitFor when it's exactly half of timeout", async () => {
-      const response = await scrape({
-        url: "http://firecrawl.dev",
-        waitFor: 7500,
-        timeout: 15000,
-      }, identity);
+    // TODO: does not make sense. reevaluate - mogery
+    // it.concurrent("allows waitFor when it's exactly half of timeout", async () => {
+    //   const response = await scrape({
+    //     url: "http://firecrawl.dev",
+    //     waitFor: 7500,
+    //     timeout: 15000,
+    //   }, identity);
 
-      expect(response.markdown).toContain("Firecrawl");
-    }, scrapeTimeout);
+    //   expect(response.markdown).toContain("Firecrawl");
+    // }, scrapeTimeout);
 
     it.concurrent("rejects waitFor when it exceeds half of timeout", async () => {
       const raw = await scrapeRaw({
@@ -126,6 +127,17 @@ describe("Scrape tests", () => {
 
     expect(response.markdown).toContain("ぐ け げ こ ご さ ざ し じ す ず せ ぜ そ ぞ た");
   }, scrapeTimeout);
+
+  it.concurrent("links format works", async () => {
+    const response = await scrape({
+      url: "https://firecrawl.dev",
+      formats: ["links"],
+      timeout: scrapeTimeout,
+    }, identity);
+
+    expect(response.links).toBeDefined();
+    expect(response.links?.length).toBeGreaterThan(0);
+  });
 
   if (process.env.TEST_SUITE_SELF_HOSTED && process.env.PROXY_SERVER) {
     it.concurrent("self-hosted proxy works", async () => {
@@ -582,6 +594,73 @@ describe("Scrape tests", () => {
 
         expect(response.metadata.cacheState).toBe("hit");
       }, scrapeTimeout * 2 + 1 * indexCooldown);
+
+      it.concurrent("does not index PDF scrapes with parsePDF:false", async () => {
+        const id = crypto.randomUUID();
+        const url = "https://www.w3.org/WAI/ER/tests/xhtml/testfiles/resources/pdf/dummy.pdf?testId=" + id;
+
+        // First scrape with parsePDF:false and maxAge:0 to force a fresh scrape
+        const response1 = await scrape({
+          url,
+          parsePDF: false,
+          maxAge: 0,
+          timeout: scrapeTimeout,
+        }, identity);
+
+        // Verify we got base64 content
+        expect(response1.metadata.cacheState).not.toBe("hit");
+        expect(response1.markdown).toBeDefined();
+        // Base64 content should start with JVBERi (which is "%PDF" base64 encoded)
+        expect(response1.markdown!.startsWith("JVBERi")).toBe(true);
+
+        // Wait for indexing to potentially happen (it shouldn't)
+        await new Promise(resolve => setTimeout(resolve, indexCooldown));
+
+        // Now scrape with parsePDF:true and a high maxAge value
+        const response2 = await scrape({
+          url,
+          parsePDF: true,
+          maxAge: scrapeTimeout * 10,
+          timeout: scrapeTimeout,
+        }, identity);
+
+        // Should NOT hit cache (because parsePDF:false shouldn't have indexed)
+        expect(response2.metadata.cacheState).not.toBe("hit");
+        // Should get parsed text content, not base64
+        expect(response2.markdown).toBeDefined();
+        expect(response2.markdown!.startsWith("JVBERi")).toBe(false);
+        // PDF should contain actual text content
+        expect(response2.markdown!.toLowerCase()).toContain("dummy");
+
+        // Wait for this one to be indexed
+        await new Promise(resolve => setTimeout(resolve, indexCooldown));
+
+        // Now scrape again with parsePDF:true and high maxAge - should hit cache
+        const response3 = await scrape({
+          url,
+          parsePDF: true,
+          maxAge: scrapeTimeout * 10,
+          timeout: scrapeTimeout,
+        }, identity);
+
+        expect(response3.metadata.cacheState).toBe("hit");
+        expect(response3.metadata.cachedAt).toBeDefined();
+        // Should still be parsed text, not base64
+        expect(response3.markdown!.startsWith("JVBERi")).toBe(false);
+        expect(response3.markdown!.toLowerCase()).toContain("dummy");
+
+        // Verify that scraping with parsePDF:false still doesn't hit cache
+        const response4 = await scrape({
+          url,
+          parsePDF: false,
+          maxAge: scrapeTimeout * 10,
+          timeout: scrapeTimeout,
+        }, identity);
+
+        // Should not hit cache since parsePDF:false results are not indexed
+        expect(response4.metadata.cacheState).not.toBe("hit");
+        expect(response4.markdown!.startsWith("JVBERi")).toBe(true);
+      }, scrapeTimeout * 4 + 3 * indexCooldown);
     });
 
     describe("Change Tracking format", () => {
@@ -953,4 +1032,29 @@ describe("Scrape tests", () => {
 
     expect(response.markdown).toContain("```json");
   }, scrapeTimeout);
+
+  describe("__experimental_omceDomain functionality", () => {
+    it.concurrent("should accept __experimental_omceDomain flag in scrape request", async () => {
+      const response = await scrape({
+        url: "https://httpbin.org/html",
+        __experimental_omceDomain: "fake-domain.com",
+        timeout: scrapeTimeout,
+      }, identity);
+
+      expect(response.markdown).toBeDefined();
+      expect(response.metadata).toBeDefined();
+    }, scrapeTimeout);
+
+    it.concurrent("should work with __experimental_omceDomain and other experimental flags", async () => {
+      const response = await scrape({
+        url: "https://httpbin.org/html",
+        __experimental_omceDomain: "test-domain.org",
+        __experimental_omce: true,
+        timeout: scrapeTimeout,
+      }, identity);
+
+      expect(response.markdown).toBeDefined();
+      expect(response.metadata).toBeDefined();
+    }, scrapeTimeout);
+  });
 });

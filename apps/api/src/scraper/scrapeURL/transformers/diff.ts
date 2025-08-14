@@ -26,6 +26,11 @@ async function extractDataWithSchema(content: string, meta: Meta): Promise<{ ext
                     method: "extractDataWithSchema",
                 },
             },
+            metadata: {
+                teamId: meta.internalOptions.teamId,
+                functionId: "deriveDiff/extractDataWithSchema",
+                scrapeId: meta.id,
+            },
         });
         return { extract };
     } catch (error) {
@@ -84,7 +89,6 @@ export async function deriveDiff(meta: Meta, document: Document): Promise<Docume
     const job: {
         returnvalue: Document,
     } | null = data?.o_job_id ? await getJob(data.o_job_id) : null;
-
     if (data && job && job?.returnvalue) {
         const previousMarkdown = job.returnvalue.markdown!;
         const currentMarkdown = document.markdown!;
@@ -104,10 +108,10 @@ export async function deriveDiff(meta: Meta, document: Document): Promise<Docume
                 color: false,
                 wordDiff: false
             });
-            meta.logger.debug("Diff text", { diffText });
+            // meta.logger.debug("Diff text", { diffText });
             if (diffText) {
                 const diffStructured = parseDiff(diffText);
-                meta.logger.debug("Diff structured", { diffStructured });
+                // meta.logger.debug("Diff structured", { diffStructured });
                 document.changeTracking.diff = {
                     text: diffText,
                     json: {
@@ -183,6 +187,11 @@ export async function deriveDiff(meta: Meta, document: Document): Promise<Docume
                                 module: "diff",
                                 method: "deriveDiff",
                             },
+                        },
+                        metadata: {
+                            teamId: meta.internalOptions.teamId,
+                            functionId: "deriveDiff",
+                            scrapeId: meta.id,
                         },
                     });
 

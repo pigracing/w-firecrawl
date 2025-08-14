@@ -5,6 +5,7 @@ import {
   ScrapeOptions,
   Document as V1Document,
   webhookSchema,
+  TeamFlags,
 } from "./controllers/v1/types";
 import { ExtractorOptions, Document } from "./lib/entities";
 import { InternalOptions } from "./scraper/scrapeURL";
@@ -66,8 +67,6 @@ export interface RunWebScraperParams {
   mode: Mode;
   scrapeOptions: ScrapeOptions;
   internalOptions?: InternalOptions;
-  // onSuccess: (result: V1Document, mode: string) => void;
-  // onError: (error: Error) => void;
   team_id: string;
   bull_job_id: string;
   priority?: number;

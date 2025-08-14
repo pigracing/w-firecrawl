@@ -1,15 +1,18 @@
 import { Document } from "../../../../controllers/v1/types";
 import { EngineScrapeResult } from "..";
 import { Meta } from "../..";
-import { getIndexFromGCS, hashURL, index_supabase_service, normalizeURLForIndex, saveIndexToGCS, generateURLSplits, addIndexInsertJob, generateDomainSplits } from "../../../../services";
-import { EngineError, IndexMissError } from "../../error";
+import { getIndexFromGCS, hashURL, index_supabase_service, normalizeURLForIndex, saveIndexToGCS, generateURLSplits, addIndexInsertJob, generateDomainSplits, addOMCEJob, addDomainFrequencyJob } from "../../../../services";
+import { EngineError, IndexMissError, TimeoutError } from "../../error";
 import crypto from "crypto";
 
 export async function sendDocumentToIndex(meta: Meta, document: Document) {
+   
+
     const shouldCache = meta.options.storeInCache
         && !meta.internalOptions.zeroDataRetention
         && meta.winnerEngine !== "index"
         && meta.winnerEngine !== "index;documents"
+        && !(meta.winnerEngine === "pdf" && meta.options.parsePDF === false)
         && (
             meta.internalOptions.teamId === "sitemap"
             || (
@@ -39,14 +42,15 @@ export async function sendDocumentToIndex(meta: Meta, document: Document) {
             const urlObj = new URL(normalizedURL);
             const hostname = urlObj.hostname;
 
-            const domainSplits = generateDomainSplits(hostname);
+            const fakeDomain = meta.options.__experimental_omceDomain;
+            const domainSplits = generateDomainSplits(hostname, fakeDomain);
             const domainSplitsHash = domainSplits.map(split => hashURL(split));
 
             const indexId = crypto.randomUUID();
 
             try {
                 await saveIndexToGCS(indexId, {
-                    url: normalizedURL,
+                    url: document.metadata.url ?? document.metadata.sourceURL ?? meta.rewrittenUrl ?? meta.url,
                     html: document.rawHtml!,
                     statusCode: document.metadata.statusCode,
                     error: document.metadata.error,
@@ -111,6 +115,16 @@ export async function sendDocumentToIndex(meta: Meta, document: Document) {
                     error,
                 });
             }
+
+            if (domainSplits.length > 0) {
+                try {
+                    await addOMCEJob([domainSplits.length - 1, domainSplitsHash.slice(-1)[0]]);
+                } catch (error) {
+                    meta.logger.warn("Failed to add domain to OMCE job queue", {
+                        error,
+                    });
+                }
+            }
         } catch (error) {
             meta.logger.error("Failed to save document to index (outer)", {
                 error,
@@ -123,7 +137,7 @@ export async function sendDocumentToIndex(meta: Meta, document: Document) {
 
 const errorCountToRegister = 3;
 
-export async function scrapeURLWithIndex(meta: Meta): Promise<EngineScrapeResult> {
+export async function scrapeURLWithIndex(meta: Meta, timeToRun: number | undefined): Promise<EngineScrapeResult> {
     const normalizedURL = normalizeURLForIndex(meta.url);
     const urlHash = hashURL(normalizedURL);
 
@@ -152,11 +166,16 @@ export async function scrapeURLWithIndex(meta: Meta): Promise<EngineScrapeResult
         selector = selector.is("location_languages", null);
     }
 
-    const { data, error } = await selector
-        .order("created_at", { ascending: false })
-        .limit(5);
+    const { data, error } = await Promise.race([
+        selector
+            .order("created_at", { ascending: false })
+            .limit(5),
+        new Promise<{ data: { id: any; created_at: any; status: any }[], error: any }>((resolve, reject) => {
+            setTimeout(() => reject(new TimeoutError()), timeToRun ?? 10000);
+        }),
+    ]);
 
-    if (error) {
+    if (error || !data) {
         throw new EngineError("Failed to retrieve URL from DB index", {
             cause: error,
         });
@@ -187,6 +206,25 @@ export async function scrapeURLWithIndex(meta: Meta): Promise<EngineScrapeResult
     const doc = await getIndexFromGCS(id + ".json", meta.logger.child({ module: "index", method: "getIndexFromGCS" }));
     if (!doc) {
         throw new EngineError("Document not found in GCS");
+    }
+    
+    // Check if the cached content is a PDF base64 (starts with JVBERi)
+    const isCachedPdfBase64 = doc.html && doc.html.startsWith("JVBERi");
+    
+    // If the cached content is base64 PDF but we want parsed PDF (parsePDF:true or default)
+    if (isCachedPdfBase64 && meta.options.parsePDF !== false) {
+        // Cached content is unparsed PDF, but we want parsed - report cache miss
+        throw new IndexMissError();
+    }
+    
+    // If the cached content is NOT base64 PDF but we want unparsed PDF (parsePDF:false)
+    if (!isCachedPdfBase64 && meta.options.parsePDF === false) {
+        // Check if URL looks like a PDF
+        const isPdfUrl = meta.url.toLowerCase().endsWith(".pdf") || meta.url.includes(".pdf?");
+        if (isPdfUrl) {
+            // This is likely a parsed PDF cached, but we want unparsed - report cache miss
+            throw new IndexMissError();
+        }
     }
     
     return {

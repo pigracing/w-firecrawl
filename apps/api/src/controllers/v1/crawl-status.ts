@@ -38,7 +38,7 @@ export type PseudoJob<T> = {
   failedReason?: string,
 }
 
-export type DBJob = { docs: any, success: boolean, page_options: any, date_added: any, message: string | null, team_id: string}
+export type DBJob = { docs: any, success: boolean, page_options: any, date_added: any, message: string | null, team_id: string }
 
 export async function getJob(id: string): Promise<PseudoJob<any> | null> {
   const [bullJob, dbJob, gcsJob] = await Promise.all([
@@ -111,9 +111,10 @@ export async function getJobs(ids: string[]): Promise<PseudoJob<any>[]> {
       });
     }
 
+    const state = await bullJob?.getState();
     const job: PseudoJob<any> = {
       id,
-      getState: bullJob ? (() => bullJob.getState()) : (() => dbJob!.success ? "completed" : "failed"),
+      getState: bullJob ? (() => state!) : (() => dbJob!.success ? "completed" : "failed"),
       returnvalue: Array.isArray(data)
         ? data[0]
         : data,
@@ -136,12 +137,12 @@ export async function crawlStatusController(
   isBatch = false,
 ) {
   const start =
-      typeof req.query.skip === "string" ? parseInt(req.query.skip, 10) : 0;
-    const end =
-      typeof req.query.limit === "string"
-        ? start + parseInt(req.query.limit, 10) - 1
-        : undefined;
-  
+    typeof req.query.skip === "string" ? parseInt(req.query.skip, 10) : 0;
+  const end =
+    typeof req.query.limit === "string"
+      ? start + parseInt(req.query.limit, 10) - 1
+      : undefined;
+
   const sc = await getCrawl(req.params.jobId);
 
   let status: Exclude<CrawlStatusResponse, ErrorResponse>["status"];
@@ -161,6 +162,41 @@ export async function crawlStatusController(
         async (x) => [x, await getScrapeQueue().getJobState(x)] as const,
       ),
     );
+
+    if (jobStatuses.filter((x) => x[1] === "unknown").length > 0 && process.env.USE_DB_AUTHENTICATION === "true") {
+      for (let rangeStart = 0; ; rangeStart += 1000) {
+        const rangeEnd = rangeStart + 1000;
+
+        const currentJobs = await supabase_service
+          .from("firecrawl_jobs")
+          .select("success, job_id")
+          .eq("crawl_id", req.params.jobId)
+          .order("date_added", { ascending: true })
+          .range(rangeStart, rangeEnd);
+
+        const rangeLength = rangeEnd - rangeStart;
+
+        if (currentJobs.error) {
+          logger.error("Error getting current jobs", { error: currentJobs.error });
+          continue;
+        }
+
+        const data = currentJobs.data ?? [];
+
+        for (const job of data) {
+          let index = jobStatuses.findIndex((x) => x[0] === job.job_id);
+          if (index !== -1) {
+            jobStatuses[index] = [job.job_id, job.success ? "completed" : "failed"];
+          } else {
+            jobStatuses.push([job.job_id, job.success ? "completed" : "failed"]);
+          }
+        }
+
+        if (data.length < rangeLength) {
+          break;
+        }
+      }
+    }
 
     const throttledJobsSet = new Set(await getConcurrencyLimitedJobs(req.auth.team_id));
     const activeJobsSet = new Set(await getCrawlConcurrencyLimitActiveJobs(req.params.jobId));
@@ -188,9 +224,9 @@ export async function crawlStatusController(
       sc.cancelled
         ? "cancelled"
         : validJobStatuses.every((x) => x[1] === "completed") &&
-            (sc.crawlerOptions
-              ? await isCrawlKickoffFinished(req.params.jobId)
-              : true)
+          (sc.crawlerOptions
+            ? await isCrawlKickoffFinished(req.params.jobId)
+            : true)
           ? "completed"
           : "scraping";
 
@@ -212,7 +248,7 @@ export async function crawlStatusController(
         .select('*', { count: 'exact', head: true })
         .eq("crawl_id", req.params.jobId)
         .eq("success", true)
-      
+
       totalCount = x.count ?? 0;
     }
 
@@ -220,8 +256,8 @@ export async function crawlStatusController(
       const creditsRpc = await supabase_rr_service
         .rpc("credits_billed_by_crawl_id_1", {
           i_crawl_id: req.params.jobId,
-        });
-      
+        }, { get: true });
+
       creditsUsed = creditsRpc.data?.[0]?.credits_billed ?? (totalCount * (
         sc.scrapeOptions?.extract
           ? 5
@@ -235,28 +271,43 @@ export async function crawlStatusController(
       )
     }
   } else if (process.env.USE_DB_AUTHENTICATION === "true") {
-    // TODO: move to read replica
-    const { data: scrapeJobCounts, error: scrapeJobError } = await supabase_service
-      .rpc("count_jobs_of_crawl_team", { i_crawl_id: req.params.jobId, i_team_id: req.auth.team_id });
-
-    if (scrapeJobError || !scrapeJobCounts || scrapeJobCounts.length === 0) {
-      logger.error("Error getting scrape job count", { error: scrapeJobError });
-      throw scrapeJobError;
-    }
-
-    const scrapeJobCount: number = scrapeJobCounts[0].count ?? 0;
-
     const { data: crawlJobs, error: crawlJobError } = await supabase_rr_service
       .from("firecrawl_jobs")
       .select("*")
       .eq("job_id", req.params.jobId)
       .limit(1)
       .throwOnError();
-    
+
     if (crawlJobError) {
       logger.error("Error getting crawl job", { error: crawlJobError });
       throw crawlJobError;
     }
+
+    const crawlJob = crawlJobs[0];
+
+    if (crawlJob && crawlJob.team_id !== req.auth.team_id) {
+      return res.status(403).json({ success: false, error: "Forbidden" });
+    }
+
+    const crawlTtlHours = req.acuc?.flags?.crawlTtlHours ?? 24;
+    const crawlTtlMs = crawlTtlHours * 60 * 60 * 1000;
+
+    if (
+      crawlJob
+      && new Date().valueOf() - new Date(crawlJob.date_added).valueOf() > crawlTtlMs
+    ) {
+      return res.status(404).json({ success: false, error: "Job expired" });
+    }
+
+    const { data: scrapeJobCounts, error: scrapeJobError } = await supabase_rr_service
+      .rpc("count_jobs_of_crawl_team", { i_crawl_id: req.params.jobId, i_team_id: req.auth.team_id }, { get: true });
+
+    if (scrapeJobError || !scrapeJobCounts || scrapeJobCounts.length === 0) {
+      logger.error("Error getting scrape job count", { error: scrapeJobError });
+      throw (scrapeJobError ?? new Error("Unknown error getting scrape job count"));
+    }
+
+    const scrapeJobCount: number = scrapeJobCounts[0].count ?? 0;
 
     if (!crawlJobs || crawlJobs.length === 0) {
       if (scrapeJobCount === 0) {
@@ -267,23 +318,7 @@ export async function crawlStatusController(
     } else {
       status = crawlJobs[0].success ? "completed" : "failed";
     }
-
-    const crawlJob = crawlJobs[0];
-
-    if (crawlJob && crawlJob.team_id !== req.auth.team_id) {
-      return res.status(403).json({ success: false, error: "Forbidden" });
-    }
-
-    const TEMP_FAIRE_TEAM_ID = "f96ad1a4-8102-4b35-9904-36fd517d3616";
     
-    if (
-      crawlJob
-      && crawlJob.team_id !== TEMP_FAIRE_TEAM_ID
-      && new Date().valueOf() - new Date(crawlJob.date_added).valueOf() > 24 * 60 * 60 * 1000
-    ) {
-      return res.status(404).json({ success: false, error: "Job expired" });
-    }
-
     doneJobsLength = scrapeJobCount!;
     doneJobsOrder = [];
 

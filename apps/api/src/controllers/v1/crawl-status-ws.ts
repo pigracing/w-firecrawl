@@ -88,15 +88,19 @@ async function crawlStatusWS(
     }
 
     const notDoneJobIDs = jobIDs.filter((x) => !doneJobIDs.includes(x));
+
+    const queue = getScrapeQueue();
+
     const jobStatuses = await Promise.all(
       notDoneJobIDs.map(async (x) => [
         x,
-        await getScrapeQueue().getJobState(x),
+        await queue.getJobState(x),
       ]),
     );
     const newlyDoneJobIDs: string[] = jobStatuses
       .filter((x) => x[1] === "completed" || x[1] === "failed")
       .map((x) => x[0]);
+
     const newlyDoneJobs: Job[] = (
       await Promise.all(newlyDoneJobIDs.map((x) => getJob(x)))
     ).filter((x) => x !== undefined) as Job[];
@@ -113,7 +117,6 @@ async function crawlStatusWS(
     }
 
     doneJobIDs.push(...newlyDoneJobIDs);
-
     setTimeout(loop, 1000);
   };
 
@@ -122,11 +125,15 @@ async function crawlStatusWS(
   doneJobIDs = await getDoneJobsOrdered(req.params.jobId);
 
   let jobIDs = await getCrawlJobs(req.params.jobId);
+
+  const queue = getScrapeQueue();
+
   let jobStatuses = await Promise.all(
     jobIDs.map(
-      async (x) => [x, await getScrapeQueue().getJobState(x)] as const,
+      async (x) => [x, await queue.getJobState(x)] as const,
     ),
   );
+
   const throttledJobsSet = await getConcurrencyLimitedJobs(req.auth.team_id);
   
   const validJobStatuses: [string, JobState | "unknown"][] = [];

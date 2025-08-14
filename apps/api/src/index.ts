@@ -10,6 +10,7 @@ import {
   getGenerateLlmsTxtQueue,
   getDeepResearchQueue,
   getBillingQueue,
+  getPrecrawlQueue,
 } from "./services/queue-service";
 import { v0Router } from "./routes/v0";
 import os from "os";
@@ -25,17 +26,33 @@ import { v4 as uuidv4 } from "uuid";
 import { RateLimiterMode } from "./types";
 import { attachWsProxy } from "./services/agentLivecastWS";
 import { cacheableLookup } from "./scraper/scrapeURL/lib/cacheableLookup";
+import domainFrequencyRouter from "./routes/domain-frequency";
+import { NodeSDK } from "@opentelemetry/sdk-node";
+import { LangfuseExporter } from "langfuse-vercel";
+import { getNodeAutoInstrumentations } from "@opentelemetry/auto-instrumentations-node";
 
 const { createBullBoard } = require("@bull-board/api");
-const { BullAdapter } = require("@bull-board/api/bullAdapter");
+const { BullMQAdapter } = require('@bull-board/api/bullMQAdapter');
 const { ExpressAdapter } = require("@bull-board/express");
 
 const numCPUs = process.env.ENV === "local" ? 2 : os.cpus().length;
 logger.info(`Number of CPUs: ${numCPUs} available`);
 
+logger.info("Network info dump", {
+  networkInterfaces: os.networkInterfaces(),
+});
+
 // Install cacheable lookup for all other requests
 cacheableLookup.install(http.globalAgent);
 cacheableLookup.install(https.globalAgent);
+
+const langfuseOtel = process.env.LANGFUSE_PUBLIC_KEY ? new NodeSDK({
+  traceExporter: new LangfuseExporter(),
+  instrumentations: [getNodeAutoInstrumentations()]
+}) : null;
+if (langfuseOtel) {
+  langfuseOtel.start();
+}
 
 // Initialize Express with WebSocket support
 const expressApp = express();
@@ -54,11 +71,12 @@ serverAdapter.setBasePath(`/admin/${process.env.BULL_AUTH_KEY}/queues`);
 
 const { addQueue, removeQueue, setQueues, replaceQueues } = createBullBoard({
   queues: [
-    new BullAdapter(getScrapeQueue()),
-    new BullAdapter(getExtractQueue()),
-    new BullAdapter(getGenerateLlmsTxtQueue()),
-    new BullAdapter(getDeepResearchQueue()),
-    new BullAdapter(getBillingQueue()),
+    new BullMQAdapter(getScrapeQueue()),
+    new BullMQAdapter(getExtractQueue()),
+    new BullMQAdapter(getGenerateLlmsTxtQueue()),
+    new BullMQAdapter(getDeepResearchQueue()),
+    new BullMQAdapter(getBillingQueue()),
+    new BullMQAdapter(getPrecrawlQueue()),
   ],
   serverAdapter: serverAdapter,
 });
@@ -81,6 +99,7 @@ app.get("/test", async (req, res) => {
 app.use(v0Router);
 app.use("/v1", v1Router);
 app.use(adminRouter);
+app.use(domainFrequencyRouter);
 
 const DEFAULT_PORT = process.env.PORT ?? 3002;
 const HOST = process.env.HOST ?? "localhost";
@@ -102,7 +121,13 @@ function startServer(port = DEFAULT_PORT) {
     }
     server.close(() => {
       logger.info("Server closed.");
-      process.exit(0);
+      if (langfuseOtel) {
+        langfuseOtel.shutdown().then(() => {
+          process.exit(0);
+        });
+      } else {
+        process.exit(0);
+      }
     });
   };
 

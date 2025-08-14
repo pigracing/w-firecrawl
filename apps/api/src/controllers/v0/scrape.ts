@@ -93,47 +93,36 @@ export async function scrapeHelper(
 
   let doc;
 
-  const err = await Sentry.startSpan(
-    {
-      name: "Wait for job to finish",
-      op: "bullmq.wait",
-      attributes: { job: jobId },
-    },
-    async (span) => {
-      try {
-        doc = await waitForJob(jobId, timeout);
-      } catch (e) {
-        if (
-          e instanceof Error &&
-          (e.message.startsWith("Job wait") || e.message === "timeout")
-        ) {
-          span.setAttribute("timedOut", true);
-          return {
-            success: false,
-            error: "Request timed out",
-            returnCode: 408,
-          };
-        } else if (
-          typeof e === "string" &&
-          (e.includes("Error generating completions: ") ||
-            e.includes("Invalid schema for function") ||
-            e.includes(
-              "LLM extraction did not match the extraction schema you provided.",
-            ))
-        ) {
-          return {
-            success: false,
-            error: e,
-            returnCode: 500,
-          };
-        } else {
-          throw e;
-        }
-      }
-      span.setAttribute("result", JSON.stringify(doc));
-      return null;
-    },
-  );
+  try {
+    doc = await waitForJob(jobId, timeout);
+  } catch (e) {
+    if (
+      e instanceof Error &&
+      (e.message.startsWith("Job wait") || e.message === "timeout")
+    ) {
+      return {
+        success: false,
+        error: "Request timed out",
+        returnCode: 408,
+      };
+    } else if (
+      typeof e === "string" &&
+      (e.includes("Error generating completions: ") ||
+        e.includes("Invalid schema for function") ||
+        e.includes(
+          "LLM extraction did not match the extraction schema you provided.",
+        ))
+    ) {
+      return {
+        success: false,
+        error: e,
+        returnCode: 500,
+      };
+    } else {
+      throw e;
+    }
+  }
+  const err = null;
 
   if (err !== null) {
     return err;
@@ -192,8 +181,13 @@ export async function scrapeController(req: Request, res: Response) {
       return res.status(400).json({ error: "Your team has zero data retention enabled. This is not supported on the v0 API. Please update your code to use the v1 API." });
     }
 
+    const jobId = uuidv4();
+
     redisEvictConnection.sadd("teams_using_v0", team_id)
       .catch(error => logger.error("Failed to add team to teams_using_v0", { error, team_id }));
+
+    redisEvictConnection.sadd("teams_using_v0:" + team_id, "scrape:" + jobId)
+      .catch(error => logger.error("Failed to add team to teams_using_v0 (2)", { error, team_id }));
 
     const crawlerOptions = req.body.crawlerOptions ?? {};
     const pageOptions = { ...defaultPageOptions, ...req.body.pageOptions };
@@ -238,8 +232,6 @@ export async function scrapeController(req: Request, res: Response) {
           "Error checking team credits. Please contact help@firecrawl.com for help.",
       });
     }
-
-    const jobId = uuidv4();
 
     const startTime = new Date().getTime();
     const result = await scrapeHelper(

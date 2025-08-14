@@ -7,6 +7,7 @@ import {
   searchRequestSchema,
   ScrapeOptions,
   TeamFlags,
+  scrapeOptions,
 } from "./types";
 import { billTeam } from "../../services/billing/credit_billing";
 import { v4 as uuidv4 } from "uuid";
@@ -110,7 +111,7 @@ async function scrapeSearchResult(
         team_id: options.teamId,
         scrapeOptions: {
           ...options.scrapeOptions,
-          maxAge: 3 * 24 * 60 * 60 * 1000, // 3 days
+          maxAge: options.scrapeOptions.maxAge === 0 ? 3 * 24 * 60 * 60 * 1000 : options.scrapeOptions.maxAge,
         },
         internalOptions: { teamId: options.teamId, bypassBilling: true, zeroDataRetention },
         origin: options.origin,
@@ -202,6 +203,7 @@ export async function searchController(
     module: "search",
     method: "searchController",
     zeroDataRetention: req.acuc?.flags?.forceZDR,
+    searchQuery: req.body.query.slice(0, 100),
   });
 
   if (req.acuc?.flags?.forceZDR) {
@@ -325,7 +327,7 @@ export async function searchController(
             { teamId: req.auth.team_id, bypassBilling: true, zeroDataRetention: false },
             matchingDocWithCost.document, 
             matchingDocWithCost.costTracking,
-            req.acuc.flags,
+            req.acuc?.flags ?? null,
           );
         } else {
           return 1;
@@ -375,6 +377,11 @@ export async function searchController(
         mode: "search",
         url: req.body.query,
         scrapeOptions: req.body.scrapeOptions,
+        crawlerOptions: {
+          ...req.body,
+          query: undefined,
+          scrapeOptions: undefined,
+        },
         origin: req.body.origin,
         integration: req.body.integration,
         credits_billed,

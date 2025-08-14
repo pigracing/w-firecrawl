@@ -135,31 +135,14 @@ export async function fireEngineCheckStatus(
   abort?: AbortSignal,
   production = true,
 ): Promise<FireEngineCheckStatusSuccess> {
-  let status = await Sentry.startSpan(
-    {
-      name: "fire-engine: Check status",
-      attributes: {
-        jobId,
-      },
-    },
-    async (span) => {
-      return await robustFetch({
-        url: `${production ? fireEngineURL : fireEngineStagingURL}/scrape/${jobId}`,
-        method: "GET",
-        logger: logger.child({ method: "fireEngineCheckStatus/robustFetch" }),
-        headers: {
-          ...(Sentry.isInitialized()
-            ? {
-                "sentry-trace": Sentry.spanToTraceHeader(span),
-                baggage: Sentry.spanToBaggageHeader(span),
-              }
-            : {}),
-        },
-        mock,
-        abort,
-      });
-    },
-  );
+  let status = await robustFetch({
+    url: `${production ? fireEngineURL : fireEngineStagingURL}/scrape/${jobId}`,
+    method: "GET",
+    logger: logger.child({ method: "fireEngineCheckStatus/robustFetch" }),
+    headers: {},
+    mock,
+    abort,
+  });
 
   // Fire-engine now saves the content to GCS
   if (!status.content && status.docUrl) {

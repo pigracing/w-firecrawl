@@ -16,7 +16,7 @@ export async function scrapeController(
   req: RequestWithAuth<{}, ScrapeResponse, ScrapeRequest>,
   res: Response<ScrapeResponse>,
 ) {
-  const jobId = uuidv4();
+  const jobId: string = uuidv4();
   const preNormalizedBody = { ...req.body };
 
   if (req.body.zeroDataRetention && !req.acuc?.flags?.allowZDR) {
@@ -57,7 +57,7 @@ export async function scrapeController(
 
   const isDirectToBullMQ = process.env.SEARCH_PREVIEW_TOKEN !== undefined && process.env.SEARCH_PREVIEW_TOKEN === req.body.__searchPreviewToken;
   
-  await addScrapeJob(
+  const bullJob = await addScrapeJob(
     {
       url: req.body.url,
       mode: "single_urls",
@@ -74,6 +74,7 @@ export async function scrapeController(
         unnormalizedSourceURL: preNormalizedBody.url,
         bypassBilling: isDirectToBullMQ,
         zeroDataRetention,
+        teamFlags: req.acuc?.flags ?? null,
       },
       origin,
       integration: req.body.integration,
@@ -85,6 +86,7 @@ export async function scrapeController(
     jobPriority,
     isDirectToBullMQ,
   );
+  logger.info("Added scrape job now" + (bullJob ? "" : " (to concurrency queue)"));
 
   const totalWait =
     (req.body.waitFor ?? 0) +
@@ -95,10 +97,11 @@ export async function scrapeController(
 
   let doc: Document;
   try {
-    doc = await waitForJob(jobId, timeout + totalWait);
+    doc = await waitForJob(bullJob ? bullJob : jobId, timeout + totalWait, logger);
   } catch (e) {
     logger.error(`Error in scrapeController`, {
       startTime,
+      error: e,
     });
 
     if (zeroDataRetention) {
@@ -121,7 +124,11 @@ export async function scrapeController(
     }
   }
 
+  logger.info("Done with waitForJob");
+
   await getScrapeQueue().remove(jobId);
+
+  logger.info("Removed job from queue");
   
   if (!req.body.formats.includes("rawHtml")) {
     if (doc && doc.rawHtml) {

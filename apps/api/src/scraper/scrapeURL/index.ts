@@ -1,8 +1,8 @@
 import { Logger } from "winston";
 import * as Sentry from "@sentry/node";
 
-import { Document, ScrapeOptions, TimeoutSignal } from "../../controllers/v1/types";
-import { logger as _logger } from "../../lib/logger";
+import { Document, ScrapeOptions, TimeoutSignal, TeamFlags } from "../../controllers/v1/types";
+import { logger as _logger, logger } from "../../lib/logger";
 import {
   buildFallbackList,
   Engine,
@@ -34,6 +34,9 @@ import { LLMRefusalError } from "./transformers/llmExtract";
 import { urlSpecificParams } from "./lib/urlSpecificParams";
 import { loadMock, MockState } from "./lib/mock";
 import { CostTracking } from "../../lib/extract/extraction-service";
+import { robustFetch } from "./lib/fetch";
+import { addIndexRFInsertJob, generateDomainSplits, hashURL, index_supabase_service, normalizeURLForIndex, useIndex } from "../../services/index";
+import { checkRobotsTxt } from "../../lib/robots-txt";
 
 export type ScrapeUrlResponse = (
   | {
@@ -179,6 +182,9 @@ async function buildMetaObject(
     scrapeId: id,
     scrapeURL: url,
     zeroDataRetention: internalOptions.zeroDataRetention,
+    teamId: internalOptions.teamId,
+    team_id: internalOptions.teamId,
+    crawlId: internalOptions.crawlId,
   });
   const logs: any[] = [];
 
@@ -203,6 +209,7 @@ async function buildMetaObject(
 
 export type InternalOptions = {
   teamId: string;
+  crawlId?: string;
 
   priority?: number; // Passed along to fire-engine
   forceEngine?: Engine | Engine[];
@@ -219,6 +226,7 @@ export type InternalOptions = {
   saveScrapeResultToGCS?: boolean; // Passed along to fire-engine
   bypassBilling?: boolean;
   zeroDataRetention?: boolean;
+  teamFlags?: TeamFlags;
 };
 
 export type EngineResultsTracker = {
@@ -236,6 +244,7 @@ export type EngineResultsTracker = {
       }
     | {
         state: "timeout";
+        error: any;
       }
   ) & {
     startedAt: number;
@@ -314,7 +323,7 @@ async function scrapeURLLoop(meta: Meta): Promise<ScrapeUrlResponse> {
         (engineResult.statusCode >= 200 && engineResult.statusCode < 300) ||
         engineResult.statusCode === 304;
       const hasNoPageError = engineResult.error === undefined;
-      const isLikelyProxyError = [403, 429].includes(engineResult.statusCode);
+      const isLikelyProxyError = [401, 403, 429].includes(engineResult.statusCode);
 
       meta.results[engine] = {
         state: "success",
@@ -376,6 +385,7 @@ async function scrapeURLLoop(meta: Meta): Promise<ScrapeUrlResponse> {
           state: "timeout",
           startedAt,
           finishedAt: Date.now(),
+          error: safeguardCircularError(error),
         };
       } else if (
         error instanceof AddFeatureError ||
@@ -435,6 +445,9 @@ async function scrapeURLLoop(meta: Meta): Promise<ScrapeUrlResponse> {
   }
 
   if (result === null) {
+    if (meta.results["pdf"]?.state === "timeout") {
+      throw meta.results["pdf"].error ?? new TimeoutSignal();
+    }
     if (Object.values(meta.results).every(x => x.state === "timeout")) {
       throw new TimeoutSignal();
     } else {
@@ -500,8 +513,130 @@ export async function scrapeURL(
 ): Promise<ScrapeUrlResponse> {
   const meta = await buildMetaObject(id, url, options, internalOptions, costTracking);
 
+  meta.logger.info("scrapeURL entered");
+
   if (meta.rewrittenUrl) {
     meta.logger.info("Rewriting URL");
+  }
+
+  if (internalOptions.teamFlags?.checkRobotsOnScrape) {
+    meta.logger.info("Checking robots.txt", {
+      checkRobotsOnScrape: internalOptions.teamFlags?.checkRobotsOnScrape,
+      url: meta.rewrittenUrl || meta.url,
+    });
+    const urlToCheck = meta.rewrittenUrl || meta.url;
+    const isAllowed = await checkRobotsTxt(
+      urlToCheck, 
+      options.skipTlsVerification, 
+      meta.logger,
+      internalOptions.abort
+    );
+
+    
+    if (!isAllowed) {
+      meta.logger.info("URL blocked by robots.txt", { url: urlToCheck });
+      return {
+        success: false,
+        error: new Error("URL blocked by robots.txt"),
+        logs: meta.logs,
+        engines: meta.results,
+      };
+    }
+  }
+
+  meta.logger.info("Pre-recording frequency");
+  
+  const shouldRecordFrequency = useIndex
+    && meta.options.storeInCache
+    && !meta.internalOptions.zeroDataRetention
+    && internalOptions.teamId !== process.env.PRECRAWL_TEAM_ID;
+  if (shouldRecordFrequency) {
+    (async () => {
+      try {
+        meta.logger.info("Recording frequency");
+        const normalizedURL = normalizeURLForIndex(meta.url);
+        const urlHash = hashURL(normalizedURL);
+
+        let { data, error } = await index_supabase_service
+          .from("index")
+          .select("id, created_at, status")
+          .eq("url_hash", urlHash)
+          .order("created_at", { ascending: false })
+          .limit(1);
+
+        if (error) {
+          meta.logger.warn("Failed to get age data", { error });
+        }
+
+        const age = data?.[0]
+          ? Date.now() - new Date(data[0].created_at).getTime()
+          : -1;
+        
+        const fakeDomain = meta.options.__experimental_omceDomain;
+        const domainSplits = generateDomainSplits(new URL(normalizeURLForIndex(meta.url)).hostname, fakeDomain);
+        const domainHash = hashURL(domainSplits.slice(-1)[0]);
+
+        const out = {
+          domain_hash: domainHash,
+          url: meta.url,
+          age2: age,
+        };
+
+        await addIndexRFInsertJob(out);
+        meta.logger.info("Recorded frequency", { out });
+      } catch (error) {
+        meta.logger.warn("Failed to record frequency", { error });
+      }
+    })();
+  } else {
+    meta.logger.info("Not recording frequency", {
+      useIndex,
+      storeInCache: meta.options.storeInCache,
+      zeroDataRetention: meta.internalOptions.zeroDataRetention,
+    });
+  }
+
+  // Global A/B test: mirror request to staging /v1/scrape based on SCRAPEURL_AB_RATE
+  try {
+    const abRateEnv = process.env.SCRAPEURL_AB_RATE;
+    const abHostEnv = process.env.SCRAPEURL_AB_HOST;
+    const abRate = abRateEnv !== undefined ? Math.max(0, Math.min(1, Number(abRateEnv))) : 0;
+    const shouldABTest = !meta.internalOptions.zeroDataRetention
+      && abRate > 0
+      && Math.random() <= abRate
+      && abHostEnv
+      && meta.options.agent === undefined
+      && (meta.options.extract || meta.options.jsonOptions)?.agent === undefined;
+    if (shouldABTest) {
+      (async () => {
+        try {
+          const abLogger = meta.logger.child({ method: "scrapeURL/abTestToStaging" });
+          abLogger.info("A/B-testing scrapeURL to staging");
+          const abort = AbortSignal.timeout(Math.min(60000, (meta.options.timeout ?? 30000) + 10000));
+          await robustFetch({
+            url: `http://${abHostEnv}/v1/scrape`,
+            method: "POST",
+            body: {
+              url: meta.url,
+              ...meta.options,
+              origin: (meta.options as any).origin ?? "api",
+              timeout: meta.options.timeout ?? 30000,
+              maxAge: 1000000000,
+            },
+            logger: abLogger,
+            tryCount: 1,
+            ignoreResponse: true,
+            mock: null,
+            abort,
+          });
+          abLogger.info("A/B-testing scrapeURL (staging) request sent");
+        } catch (error) {
+          meta.logger.warn("A/B-testing scrapeURL (staging) failed", { error });
+        }
+      })();
+    }
+  } catch (error) {
+    meta.logger.warn("Failed to initiate A/B test to staging", { error });
   }
 
   try {

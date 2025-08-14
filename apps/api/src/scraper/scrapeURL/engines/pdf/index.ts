@@ -61,9 +61,10 @@ async function scrapePDFWithRunPodMU(
 
   const abort = timeout ? AbortSignal.timeout(timeout) : undefined;
 
+
   const podStart = await robustFetch({
     url:
-      "https://api.runpod.ai/v2/" + process.env.RUNPOD_MUV2_POD_ID + "/runsync",
+      "https://api.runpod.ai/v2/" + process.env.RUNPOD_MU_POD_ID + "/runsync",
     method: "POST",
     headers: {
       Authorization: `Bearer ${process.env.RUNPOD_MU_API_KEY}`,
@@ -250,6 +251,8 @@ export async function scrapePDF(
 
   const base64Content = (await readFile(tempFilePath)).toString("base64");
 
+  const remainingTime = timeToRun ? timeToRun - (Date.now() - startTime) : undefined;
+
   // First try RunPod MU if conditions are met
   if (
     base64Content.length < MAX_FILE_SIZE &&
@@ -265,7 +268,7 @@ export async function scrapePDF(
           }),
         },
         tempFilePath,
-        timeToRun ? timeToRun - (Date.now() - startTime) : undefined,
+        remainingTime,
         base64Content,
       );
     } catch (error) {
@@ -280,8 +283,10 @@ export async function scrapePDF(
           error.message === "Request failed" &&
           error.cause &&
           error.cause instanceof Error &&
-          error.cause.name === "TimeoutError")
+          error.cause.name === "TimeoutError") ||
+        (error instanceof Error && error.name === "TimeoutSignal")
       ) {
+        meta.logger.warn("RunPod MU timed out", { remainingTime });
         throw new TimeoutError(
           "PDF parsing timed out, please increase the timeout parameter in your scrape request",
         );

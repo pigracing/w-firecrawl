@@ -4,7 +4,6 @@ import { authenticateUser } from "../auth";
 import { RateLimiterMode } from "../../../src/types";
 import { addScrapeJob } from "../../../src/services/queue-jobs";
 import { isUrlBlocked } from "../../../src/scraper/WebScraper/utils/blocklist";
-import { logCrawl } from "../../../src/services/logging/crawl_log";
 import { validateIdempotencyKey } from "../../../src/services/idempotency/validate";
 import { createIdempotencyKey } from "../../../src/services/idempotency/create";
 import {
@@ -45,8 +44,13 @@ export async function crawlController(req: Request, res: Response) {
       return res.status(400).json({ error: "Your team has zero data retention enabled. This is not supported on the v0 API. Please update your code to use the v1 API." });
     }
 
+    const id = uuidv4();
+
     redisEvictConnection.sadd("teams_using_v0", team_id)
       .catch(error => logger.error("Failed to add team to teams_using_v0", { error, team_id }));
+    
+    redisEvictConnection.sadd("teams_using_v0:" + team_id, "crawl:" + id)
+      .catch(error => logger.error("Failed to add team to teams_using_v0 (2)", { error, team_id }));
 
     if (req.headers["x-idempotency-key"]) {
       const isIdempotencyValid = await validateIdempotencyKey(req);
@@ -153,10 +157,6 @@ export async function crawlController(req: Request, res: Response) {
     //     return res.status(500).json({ error: error.message });
     //   }
     // }
-
-    const id = uuidv4();
-
-    await logCrawl(id, team_id);
 
     const { scrapeOptions, internalOptions } = fromLegacyScrapeOptions(
       pageOptions,
