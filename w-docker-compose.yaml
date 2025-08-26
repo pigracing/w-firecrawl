@@ -48,7 +48,8 @@ x-common-env: &common-env
 
 services:
   playwright-service:
-    build: apps/playwright-service-ts
+    image: ricebug/playwright-service
+    #build: apps/playwright-service-ts
     environment:
       PORT: 3000
       PROXY_SERVER: ${PROXY_SERVER}
