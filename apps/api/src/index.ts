@@ -26,10 +26,15 @@ import { v4 as uuidv4 } from "uuid";
 import { RateLimiterMode } from "./types";
 import { attachWsProxy } from "./services/agentLivecastWS";
 import { cacheableLookup } from "./scraper/scrapeURL/lib/cacheableLookup";
+import { v2Router } from "./routes/v2";
 import domainFrequencyRouter from "./routes/domain-frequency";
 import { NodeSDK } from "@opentelemetry/sdk-node";
 import { LangfuseExporter } from "langfuse-vercel";
 import { getNodeAutoInstrumentations } from "@opentelemetry/auto-instrumentations-node";
+import { ATTR_SERVICE_NAME } from "@opentelemetry/semantic-conventions";
+import { resourceFromAttributes } from "@opentelemetry/resources";
+import { BatchSpanProcessor } from "@opentelemetry/sdk-trace-node";
+import { OTLPTraceExporter } from "@opentelemetry/exporter-trace-otlp-grpc";
 
 const { createBullBoard } = require("@bull-board/api");
 const { BullMQAdapter } = require('@bull-board/api/bullMQAdapter');
@@ -46,12 +51,22 @@ logger.info("Network info dump", {
 cacheableLookup.install(http.globalAgent);
 cacheableLookup.install(https.globalAgent);
 
-const langfuseOtel = process.env.LANGFUSE_PUBLIC_KEY ? new NodeSDK({
-  traceExporter: new LangfuseExporter(),
-  instrumentations: [getNodeAutoInstrumentations()]
+const shouldOtel = process.env.LANGFUSE_PUBLIC_KEY || process.env.OTEL_EXPORTER_OTLP_ENDPOINT;
+const otelSdk = shouldOtel ? new NodeSDK({
+  resource: resourceFromAttributes({
+    [ATTR_SERVICE_NAME]: "firecrawl-app",
+  }),
+  spanProcessors: [
+    ...(process.env.LANGFUSE_PUBLIC_KEY ? [new BatchSpanProcessor(new LangfuseExporter())] : []),
+    ...(process.env.OTEL_EXPORTER_OTLP_ENDPOINT ? [new BatchSpanProcessor(new OTLPTraceExporter({
+      url: process.env.OTEL_EXPORTER_OTLP_ENDPOINT,
+    }))] : []),
+  ],
+  instrumentations: [getNodeAutoInstrumentations()],
 }) : null;
-if (langfuseOtel) {
-  langfuseOtel.start();
+    
+if (otelSdk) {   
+  otelSdk.start();
 }
 
 // Initialize Express with WebSocket support
@@ -98,6 +113,7 @@ app.get("/test", async (req, res) => {
 // register router
 app.use(v0Router);
 app.use("/v1", v1Router);
+app.use("/v2", v2Router);
 app.use(adminRouter);
 app.use(domainFrequencyRouter);
 
@@ -121,8 +137,9 @@ function startServer(port = DEFAULT_PORT) {
     }
     server.close(() => {
       logger.info("Server closed.");
-      if (langfuseOtel) {
-        langfuseOtel.shutdown().then(() => {
+      if (otelSdk) {
+        otelSdk.shutdown().then(() => {
+          logger.info("OTEL shutdown");
           process.exit(0);
         });
       } else {
@@ -232,7 +249,7 @@ app.use(
 
       res
         .status(400)
-        .json({ success: false, error: "Bad Request", details: err.errors });
+        .json({ success: false, code: "BAD_REQUEST", error: "Bad Request", details: err.errors });
     } else {
       next(err);
     }
@@ -256,7 +273,7 @@ app.use(
     ) {
       return res
         .status(400)
-        .json({ success: false, error: "Bad request, malformed JSON" });
+        .json({ success: false, code: "BAD_REQUEST_INVALID_JSON", error: "Bad request, malformed JSON" });
     }
 
     const id = res.sentry ?? uuidv4();
@@ -270,6 +287,7 @@ app.use(
     { error: err, errorId: id, path: req.path, teamId: req.acuc?.team_id, team_id: req.acuc?.team_id });
     res.status(500).json({
       success: false,
+      code: "UNKNOWN_ERROR",
       error:
         "An unexpected error occurred. Please contact help@firecrawl.com for help. Your exception ID is " +
         id,

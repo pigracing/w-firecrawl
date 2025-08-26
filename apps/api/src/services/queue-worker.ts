@@ -5,10 +5,9 @@ import {
   getScrapeQueue,
   getExtractQueue,
   getDeepResearchQueue,
-  redisConnection,
   getGenerateLlmsTxtQueue,
   scrapeQueueName,
-  createRedisConnection,
+  getRedisConnection,
 } from "./queue-service";
 import { Job, Queue, QueueEvents } from "bullmq";
 import { logger as _logger } from "../lib/logger";
@@ -23,9 +22,7 @@ import {
 } from "../lib/crawl-redis";
 import { StoredCrawl } from "../lib/crawl-redis";
 import { configDotenv } from "dotenv";
-import {
-  concurrentJobDone,
-} from "../lib/concurrency-limit";
+import { concurrentJobDone } from "../lib/concurrency-limit";
 import {
   ExtractResult,
   performExtraction,
@@ -47,6 +44,12 @@ import { finishCrawlIfNeeded } from "./worker/crawl-logic";
 import { NodeSDK } from "@opentelemetry/sdk-node";
 import { getNodeAutoInstrumentations } from "@opentelemetry/auto-instrumentations-node";
 import { LangfuseExporter } from "langfuse-vercel";
+import { BatchSpanProcessor } from "@opentelemetry/sdk-trace-node";
+import { ATTR_SERVICE_NAME } from "@opentelemetry/semantic-conventions";
+import { resourceFromAttributes } from "@opentelemetry/resources";
+import { OTLPTraceExporter } from "@opentelemetry/exporter-trace-otlp-grpc";
+import { BullMQOtel } from "bullmq-otel";
+import { pathToFileURL } from "url";
 
 configDotenv();
 
@@ -69,16 +72,22 @@ const runningJobs: Set<string> = new Set();
 cacheableLookup.install(http.globalAgent);
 cacheableLookup.install(https.globalAgent);
 
-const langfuseOtel = process.env.LANGFUSE_PUBLIC_KEY ? new NodeSDK({
-  traceExporter: new LangfuseExporter(),
-  instrumentations: [getNodeAutoInstrumentations({
-    '@opentelemetry/instrumentation-undici': { enabled: false },
-    '@opentelemetry/instrumentation-http': { enabled: false },
-  })],
+const shouldOtel = process.env.LANGFUSE_PUBLIC_KEY || process.env.OTEL_EXPORTER_OTLP_ENDPOINT;
+const otelSdk = shouldOtel ? new NodeSDK({
+  resource: resourceFromAttributes({
+    [ATTR_SERVICE_NAME]: "firecrawl-worker",
+  }),
+  spanProcessors: [
+    ...(process.env.LANGFUSE_PUBLIC_KEY ? [new BatchSpanProcessor(new LangfuseExporter())] : []),
+    ...(process.env.OTEL_EXPORTER_OTLP_ENDPOINT ? [new BatchSpanProcessor(new OTLPTraceExporter({
+      url: process.env.OTEL_EXPORTER_OTLP_ENDPOINT,
+    }))] : []),
+  ],
+  instrumentations: [getNodeAutoInstrumentations()],
 }) : null;
 
-if (langfuseOtel) {
-  langfuseOtel.start();
+if (otelSdk) {
+  otelSdk.start();
 }
 
 const processExtractJobInternal = async (
@@ -101,8 +110,12 @@ const processExtractJobInternal = async (
   try {
     let result: ExtractResult | null = null;
 
-    const model = job.data.request.agent?.model
-    if (job.data.request.agent && model && model.toLowerCase().includes("fire-1")) {
+    const model = job.data.request.agent?.model;
+    if (
+      job.data.request.agent &&
+      model &&
+      model.toLowerCase().includes("fire-1")
+    ) {
       result = await performExtraction(job.data.extractId, {
         request: job.data.request,
         teamId: job.data.teamId,
@@ -343,21 +356,38 @@ process.on("SIGTERM", () => {
 
 let cantAcceptConnectionCount = 0;
 
+/**
+ * Converts a file path to a proper URL for cross-platform compatibility.
+ * On Windows, absolute paths need to be converted to file:// URLs for ESM imports.
+ * @param filePath - The file path to convert
+ * @returns A properly formatted path/URL for the current platform
+ */
+function getWorkerPath(filePath: string): string {
+  if (process.platform === 'win32' && path.isAbsolute(filePath)) {
+    // On Windows, convert absolute paths to file:// URLs for ESM compatibility
+    return pathToFileURL(filePath).href;
+  }
+  return filePath;
+}
+
 const separateWorkerFun = (
   queue: Queue,
-  path: string,
+  workerPath: string,
 ): Worker => {
   // Extract memory size from --max-old-space-size flag if present
   const maxOldSpaceSize = process.env.SCRAPE_WORKER_MAX_OLD_SPACE_SIZE || process.execArgv
     .find(arg => arg.startsWith('--max-old-space-size='))
     ?.split('=')[1];
-  
+
   // Filter out the invalid flag for worker threads
   const filteredExecArgv = process.execArgv
     .filter(arg => !arg.startsWith('--max-old-space-size'));
 
-  const worker = new Worker(queue.name, path, {
-    connection: createRedisConnection(),
+  // Convert path to proper format for the current platform
+  const platformWorkerPath = getWorkerPath(workerPath);
+
+  const worker = new Worker(queue.name, platformWorkerPath, {
+    connection: getRedisConnection(),
     lockDuration: 60 * 1000, // 60 seconds
     stalledInterval: 60 * 1000, // 60 seconds
     maxStalledCount: 10, // 10 times
@@ -373,11 +403,12 @@ const separateWorkerFun = (
       resourceLimits: maxOldSpaceSize ? {
         maxOldGenerationSizeMb: parseInt(maxOldSpaceSize)
       } : undefined
-    }
+    },
+    telemetry: new BullMQOtel("firecrawl-bullmq"),
   });
 
   return worker;
-}
+};
 
 const workerFun = async (
   queue: Queue,
@@ -386,10 +417,11 @@ const workerFun = async (
   const logger = _logger.child({ module: "queue-worker", method: "workerFun" });
 
   const worker = new Worker(queue.name, null, {
-    connection: redisConnection,
+    connection: getRedisConnection(),
     lockDuration: 60 * 1000, // 60 seconds
     stalledInterval: 60 * 1000, // 60 seconds
     maxStalledCount: 10, // 10 times
+    telemetry: new BullMQOtel("firecrawl-bullmq"),
   });
 
   worker.startStalledCheckTimer();
@@ -465,7 +497,7 @@ app.get("/liveness", (req, res) => {
     const host = process.env.FIRECRAWL_APP_HOST || "firecrawl-app-service";
     const port = process.env.FIRECRAWL_APP_PORT || "3002";
     const scheme = process.env.FIRECRAWL_APP_SCHEME || "http";
-    
+
     robustFetch({
       url: `${scheme}://${host}:${port}`,
       method: "GET",
@@ -496,13 +528,24 @@ app.listen(workerPort, () => {
 
 (async () => {
   async function failedListener(args: { jobId: string; failedReason: string; prev?: string | undefined; }) {
+    const job = await getScrapeQueue().getJob(args.jobId);
+
+    if (job && job.data.crawl_id) {
+      await redisEvictConnection.srem("crawl:" + job.data.crawl_id + ":jobs_qualified", args.jobId);
+      await redisEvictConnection.expire("crawl:" + job.data.crawl_id + ":jobs_qualified", 24 * 60 * 60);
+    }
+
     if (args.failedReason === "job stalled more than allowable limit") {
-      const set = await redisEvictConnection.set("stalled-job-cleaner:" + args.jobId, "1", "EX", 60 * 60 * 24, "NX");
+      const set = await redisEvictConnection.set(
+        "stalled-job-cleaner:" + args.jobId,
+        "1",
+        "EX",
+        60 * 60 * 24,
+        "NX",
+      );
       if (!set) {
         return;
       }
-
-      const job = await getScrapeQueue().getJob(args.jobId);
 
       let logger = _logger.child({ jobId: args.jobId, scrapeId: args.jobId, module: "queue-worker", method: "failedListener", zeroDataRetention: job?.data.zeroDataRetention });
       if (job && job.data.crawl_id) {
@@ -518,14 +561,14 @@ app.listen(workerPort, () => {
           }
         } else {
           const sc = (await getCrawl(job.data.crawl_id)) as StoredCrawl;
-  
+
           logger.debug("Declaring job as done...");
           await addCrawlJobDone(job.data.crawl_id, job.id, false, logger);
           await redisEvictConnection.srem(
             "crawl:" + job.data.crawl_id + ":visited_unique",
             normalizeURL(job.data.url, sc),
           );
-    
+
           await finishCrawlIfNeeded(job, sc);
         }
       } else {
@@ -534,11 +577,14 @@ app.listen(workerPort, () => {
     }
   }
 
-  const scrapeQueueEvents = new QueueEvents(scrapeQueueName, { connection: redisConnection });
+  const scrapeQueueEvents = new QueueEvents(scrapeQueueName, { connection: getRedisConnection() });
   scrapeQueueEvents.on("failed", failedListener);
 
   const results = await Promise.all([
-    separateWorkerFun(getScrapeQueue(), path.join(__dirname, "worker", "scrape-worker.js")),
+    separateWorkerFun(
+      getScrapeQueue(),
+      path.join(__dirname, "worker", "scrape-worker.js"),
+    ),
     workerFun(getExtractQueue(), processExtractJobInternal),
     workerFun(getDeepResearchQueue(), processDeepResearchJobInternal),
     workerFun(getGenerateLlmsTxtQueue(), processGenerateLlmsTxtJobInternal),
@@ -546,8 +592,8 @@ app.listen(workerPort, () => {
 
   console.log("All workers exited. Waiting for all jobs to finish...");
 
-  const workerResults = results.filter(x => x instanceof Worker);
-  await Promise.all(workerResults.map(x => x.close()));
+  const workerResults = results.filter((x) => x instanceof Worker);
+  await Promise.all(workerResults.map((x) => x.close()));
 
   while (runningJobs.size > 0) {
     await new Promise((resolve) => setTimeout(resolve, 500));
@@ -555,16 +601,20 @@ app.listen(workerPort, () => {
 
   setInterval(async () => {
     _logger.debug("Currently running jobs", {
-      jobs: (await Promise.all([...runningJobs].map(async (jobId) => {
-        return await getScrapeQueue().getJob(jobId);
-      }))).filter(x => x && !x.data?.zeroDataRetention),
+      jobs: (
+        await Promise.all(
+          [...runningJobs].map(async (jobId) => {
+            return await getScrapeQueue().getJob(jobId);
+          }),
+        )
+      ).filter((x) => x && !x.data?.zeroDataRetention),
     });
   }, 1000);
 
   await scrapeQueueEvents.close();
   console.log("All jobs finished. Worker out!");
-  if (langfuseOtel) {
-    await langfuseOtel.shutdown();
+  if (otelSdk) {
+    await otelSdk.shutdown();
   }
   process.exit(0);
 })();

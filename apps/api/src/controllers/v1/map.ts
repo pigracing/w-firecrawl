@@ -4,10 +4,9 @@ import {
   MapDocument,
   mapRequestSchema,
   RequestWithAuth,
-  scrapeOptions,
   TeamFlags,
-  TimeoutSignal,
 } from "./types";
+import { scrapeOptions } from "../v2/types";
 import { crawlToCrawler, StoredCrawl } from "../../lib/crawl-redis";
 import { MapResponse, MapRequest } from "./types";
 import { configDotenv } from "dotenv";
@@ -24,6 +23,7 @@ import { performCosineSimilarity } from "../../lib/map-cosine";
 import { logger } from "../../lib/logger";
 import Redis from "ioredis";
 import { generateURLSplits, queryIndexAtDomainSplitLevel, queryIndexAtSplitLevel } from "../../services/index";
+import { MapTimeoutError } from "../../lib/error";
 
 configDotenv();
 const redis = new Redis(process.env.REDIS_URL!);
@@ -53,8 +53,10 @@ async function queryIndex(url: string, limit: number, useIndex: boolean, include
     const hostname = urlObj.hostname;
 
     // TEMP: this should be altered on June 15th 2025 7AM PT - mogery
-    const domainLinks = includeSubdomains ? await queryIndexAtDomainSplitLevel(hostname, limit, 14 * 24 * 60 * 60 * 1000) : [];
-    const splitLinks = await queryIndexAtSplitLevel(url, limit, 14 * 24 * 60 * 60 * 1000);
+    const [domainLinks, splitLinks] = await Promise.all([
+      includeSubdomains ? queryIndexAtDomainSplitLevel(hostname, limit, 14 * 24 * 60 * 60 * 1000) : [],
+      queryIndexAtSplitLevel(url, limit, 14 * 24 * 60 * 60 * 1000),
+    ]);
 
     return Array.from(new Set([...domainLinks, ...splitLinks]));
   } else {
@@ -353,16 +355,17 @@ export async function mapController(
       }),
       ...(req.body.timeout !== undefined ? [
         new Promise((resolve, reject) => setTimeout(() => {
-          abort.abort(new TimeoutSignal());
-          reject(new TimeoutSignal());
+          abort.abort(new MapTimeoutError());
+          reject(new MapTimeoutError());
         }, req.body.timeout))
       ] : []),
     ]) as any;
   } catch (error) {
-    if (error instanceof TimeoutSignal || error === "timeout") {
+    if (error instanceof MapTimeoutError) {
       return res.status(408).json({
         success: false,
-        error: "Request timed out",
+        code: error.code,
+        error: error.message,
       });
     } else {
       throw error;

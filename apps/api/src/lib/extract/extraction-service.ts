@@ -1,10 +1,10 @@
 import {
   Document,
   ExtractRequest,
-  isAgentExtractModelValid,
   TokenUsage,
   URLTrace,
-} from "../../controllers/v1/types";
+} from "../../controllers/v2/types";
+import { isAgentExtractModelValid } from "../../controllers/v1/types";
 import { logger as _logger } from "../logger";
 import { generateBasicCompletion, processUrl } from "./url-processor";
 import { scrapeDocument } from "./document-scraper";
@@ -176,6 +176,7 @@ export async function performExtraction(
       let rptxt = rephrasedPrompt?.text.replace('"', "").replace("'", "") || "";
       const searchResults = await search({
         query: rptxt,
+        logger,
         num_results: 10,
       });
 

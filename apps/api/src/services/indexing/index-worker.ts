@@ -4,7 +4,7 @@ import * as Sentry from "@sentry/node";
 import { Job, Queue, Worker } from "bullmq";
 import { logger as _logger, logger } from "../../lib/logger";
 import {
-  redisConnection,
+  getRedisConnection,
   getBillingQueue,
   getPrecrawlQueue,
   precrawlQueueName,
@@ -14,9 +14,10 @@ import systemMonitor from "../system-monitor";
 import { v4 as uuidv4 } from "uuid";
 import { index_supabase_service, processIndexInsertJobs, processIndexRFInsertJobs, processOMCEJobs, processDomainFrequencyJobs } from "..";
 import { processWebhookInsertJobs } from "../webhook";
-import { scrapeOptions as scrapeOptionsSchema, crawlRequestSchema, toLegacyCrawlerOptions } from "../../controllers/v1/types";
+import { scrapeOptions as scrapeOptionsSchema, crawlRequestSchema, toV0CrawlerOptions } from "../../controllers/v2/types";
 import { StoredCrawl, crawlToCrawler, saveCrawl } from "../../lib/crawl-redis";
 import { _addScrapeJobToBullMQ } from "../queue-jobs";
+import { BullMQOtel } from "bullmq-otel";
 
 const workerLockDuration = Number(process.env.WORKER_LOCK_DURATION) || 60000;
 const workerStalledCheckInterval =
@@ -134,7 +135,7 @@ const processPrecrawlJobInternal = async (token: string, job: Job) => {
       
         const sc: StoredCrawl = {
           originUrl: url,
-          crawlerOptions: toLegacyCrawlerOptions(crawlerOptions),
+          crawlerOptions: toV0CrawlerOptions(crawlerOptions),
           scrapeOptions,
           internalOptions: {
             disableSmartWaitCache: true,
@@ -218,10 +219,11 @@ const workerFun = async (queue: Queue, jobProcessor: (token: string, job: Job) =
   const logger = _logger.child({ module: "index-worker", method: "workerFun" });
 
   const worker = new Worker(queue.name, null, {
-    connection: redisConnection,
+    connection: getRedisConnection(),
     lockDuration: workerLockDuration,
     stalledInterval: workerStalledCheckInterval,
     maxStalledCount: queue.name === precrawlQueueName ? 0 : 10,
+    telemetry: new BullMQOtel("firecrawl-bullmq"),
   });
 
   worker.startStalledCheckTimer();

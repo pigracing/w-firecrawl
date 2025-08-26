@@ -3,7 +3,7 @@ import {
     ExtractRequest,
     TokenUsage,
     URLTrace,
-  } from "../../../controllers/v1/types";
+  } from "../../../controllers/v2/types";
   import { logger as _logger } from "../../logger";
   import { scrapeDocument_F0 } from "./document-scraper-f0";
   import { billTeam } from "../../../services/billing/credit_billing";
@@ -108,6 +108,7 @@ import { langfuse } from "../../../services/langfuse";
       const rephrasedPrompt = await generateBasicCompletion_FO(buildRephraseToSerpPrompt_F0(request.prompt), { teamId, extractId });
       const searchResults = await search({
         query:  rephrasedPrompt.replace('"', "").replace("'", ""),
+        logger,
         num_results: 10,
       });
   
