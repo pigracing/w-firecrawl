@@ -1,6 +1,6 @@
 import { TokenUsage } from "../../../controllers/v1/types";
 import { logger } from "../../../lib/logger";
-import { CostTracking } from "../extraction-service";
+import { CostTracking } from "../../cost-tracking";
 import { modelPrices } from "./model-prices";
 
 interface ModelPricing {
@@ -28,7 +28,7 @@ export function estimateTotalCost(tokenUsage: TokenUsage[]): number {
   }, 0);
 }
 
-export function estimateCost(tokenUsage: TokenUsage): number {
+function estimateCost(tokenUsage: TokenUsage): number {
   let totalCost = 0;
   try {
     let model = tokenUsage.model ?? (process.env.MODEL_NAME || "gpt-4o-mini");

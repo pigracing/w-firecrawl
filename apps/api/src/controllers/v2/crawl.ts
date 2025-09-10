@@ -11,7 +11,8 @@ import { crawlToCrawler, saveCrawl, StoredCrawl } from "../../lib/crawl-redis";
 import { _addScrapeJobToBullMQ } from "../../services/queue-jobs";
 import { logger as _logger } from "../../lib/logger";
 import { generateCrawlerOptionsFromPrompt } from "../../scraper/scrapeURL/transformers/llmExtract";
-import { CostTracking } from "../../lib/extract/extraction-service";
+import { CostTracking } from "../../lib/cost-tracking";
+import { checkPermissions } from "../../lib/permissions";
 
 export async function crawlController(
   req: RequestWithAuth<{}, CrawlResponse, CrawlRequest>,
@@ -20,14 +21,16 @@ export async function crawlController(
   const preNormalizedBody = req.body;
   req.body = crawlRequestSchema.parse(req.body);
 
-  if (req.body.zeroDataRetention && !req.acuc?.flags?.allowZDR) {
-    return res.status(400).json({
+  const permissions = checkPermissions(req.body, req.acuc?.flags);
+  if (permissions.error) {
+    return res.status(403).json({
       success: false,
-      error: "Zero data retention is enabled for this team. If you're interested in ZDR, please contact support@firecrawl.com",
+      error: permissions.error,
     });
   }
 
-  const zeroDataRetention = req.acuc?.flags?.forceZDR || req.body.zeroDataRetention;
+  const zeroDataRetention =
+    req.acuc?.flags?.forceZDR || req.body.zeroDataRetention;
 
   const id = uuidv4();
   const logger = _logger.child({
@@ -57,7 +60,7 @@ export async function crawlController(
     prompt: undefined,
   };
   const scrapeOptions = req.body.scrapeOptions;
-  
+
   let promptGeneratedOptions = {};
   if (req.body.prompt) {
     try {
@@ -66,7 +69,7 @@ export async function crawlController(
         req.body.prompt,
         logger,
         costTracking,
-        { teamId: req.auth.team_id, crawlId: id }
+        { teamId: req.auth.team_id, crawlId: id },
       );
       promptGeneratedOptions = extract || {};
       logger.debug("Generated crawler options from prompt", {
@@ -81,7 +84,8 @@ export async function crawlController(
       });
       return res.status(400).json({
         success: false,
-        error: "Failed to process natural language prompt. Please try rephrasing or use explicit crawler options.",
+        error:
+          "Failed to process natural language prompt. Please try rephrasing or use explicit crawler options.",
       });
     }
   }
@@ -93,8 +97,15 @@ export async function crawlController(
   // This prevents empty defaults like [] from overwriting meaningful prompt-generated values.
   const finalCrawlerOptions: any = { ...crawlerOptions };
   for (const [key, value] of Object.entries(promptGeneratedOptions)) {
-    const userProvided = Object.prototype.hasOwnProperty.call(preNormalizedBody, key);
-    if (!userProvided || preNormalizedBody[key] === undefined || preNormalizedBody[key] === null) {
+    const userProvided = Object.prototype.hasOwnProperty.call(
+      preNormalizedBody,
+      key,
+    );
+    if (
+      !userProvided ||
+      preNormalizedBody[key] === undefined ||
+      preNormalizedBody[key] === null
+    ) {
       finalCrawlerOptions[key] = value;
     }
   }
@@ -120,7 +131,10 @@ export async function crawlController(
   }
 
   const originalLimit = finalCrawlerOptions.limit;
-  finalCrawlerOptions.limit = Math.min(remainingCredits, finalCrawlerOptions.limit);
+  finalCrawlerOptions.limit = Math.min(
+    remainingCredits,
+    finalCrawlerOptions.limit,
+  );
   logger.debug("Determined limit: " + finalCrawlerOptions.limit, {
     remainingCredits,
     bodyLimit: originalLimit,
@@ -134,12 +148,19 @@ export async function crawlController(
     internalOptions: {
       disableSmartWaitCache: true,
       teamId: req.auth.team_id,
-      saveScrapeResultToGCS: process.env.GCS_FIRE_ENGINE_BUCKET_NAME ? true : false,
+      saveScrapeResultToGCS: process.env.GCS_FIRE_ENGINE_BUCKET_NAME
+        ? true
+        : false,
       zeroDataRetention,
     },
     team_id: req.auth.team_id,
     createdAt: Date.now(),
-    maxConcurrency: req.body.maxConcurrency !== undefined ? Math.min(req.body.maxConcurrency, req.acuc.concurrency) : undefined,
+    maxConcurrency:
+      req.body.maxConcurrency !== undefined
+        ? req.acuc?.concurrency !== undefined
+          ? Math.min(req.body.maxConcurrency, req.acuc.concurrency)
+          : req.body.maxConcurrency
+        : undefined,
     zeroDataRetention,
   };
 
@@ -173,10 +194,9 @@ export async function crawlController(
       webhook: req.body.webhook,
       v1: true,
       zeroDataRetention: zeroDataRetention || false,
+      apiKeyId: req.acuc?.api_key_id ?? null,
     },
-    {},
     crypto.randomUUID(),
-    10,
   );
 
   const protocol = process.env.ENV === "local" ? req.protocol : "https";
@@ -185,9 +205,9 @@ export async function crawlController(
     success: true,
     id,
     url: `${protocol}://${req.get("host")}/v2/crawl/${id}`,
-    ...(req.body.prompt && { 
+    ...(req.body.prompt && {
       promptGeneratedOptions: promptGeneratedOptions,
-      finalCrawlerOptions: finalCrawlerOptions 
+      finalCrawlerOptions: finalCrawlerOptions,
     }),
   });
 }

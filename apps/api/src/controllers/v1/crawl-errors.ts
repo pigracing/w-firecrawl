@@ -4,81 +4,67 @@ import {
   CrawlStatusParams,
   RequestWithAuth,
 } from "./types";
-import {
-  getCrawl,
-  getCrawlJobs,
-} from "../../lib/crawl-redis";
-import { getScrapeQueue } from "../../services/queue-service";
+import { getCrawl, getCrawlJobs } from "../../lib/crawl-redis";
 import { redisEvictConnection } from "../../../src/services/redis";
 import { configDotenv } from "dotenv";
-import { Job } from "bullmq";
 import { supabase_rr_service } from "../../services/supabase";
-import { logger } from "../../lib/logger";
+import { logger as _logger } from "../../lib/logger";
 import { deserializeTransportableError } from "../../lib/error-serde";
 import { TransportableError } from "../../lib/error";
+import { scrapeQueue } from "../../services/worker/nuq";
 configDotenv();
-
-export async function getJob(id: string) {
-  const job = await getScrapeQueue().getJob(id);
-  if (!job) return job;
-
-  return job;
-}
-
-export async function getJobs(ids: string[]) {
-  const jobs: (Job & { id: string })[] = (
-    await Promise.all(ids.map((x) => getScrapeQueue().getJob(x)))
-  ).filter((x) => x) as (Job & { id: string })[];
-
-  return jobs;
-}
 
 export async function crawlErrorsController(
   req: RequestWithAuth<CrawlStatusParams, undefined, CrawlErrorsResponse>,
   res: Response<CrawlErrorsResponse>,
 ) {
   const sc = await getCrawl(req.params.jobId);
-  
+
   if (sc) {
     if (sc.team_id !== req.auth.team_id) {
       return res.status(403).json({ success: false, error: "Forbidden" });
     }
 
-    let jobStatuses = await Promise.all(
-      (await getCrawlJobs(req.params.jobId)).map(
-        async (x) => [x, await getScrapeQueue().getJobState(x)] as const,
-      ),
-    );
+    const logger = _logger.child({
+      crawlId: req.params.jobId,
+      zeroDataRetention: sc.zeroDataRetention ?? false,
+    });
 
-    const failedJobIDs: string[] = [];
-
-    for (const [id, status] of jobStatuses) {
-      if (status === "failed") {
-        failedJobIDs.push(id);
-      }
-    }
+    const failedJobs = (
+      await scrapeQueue.getJobsWithStatus(
+        await getCrawlJobs(req.params.jobId),
+        "failed",
+        logger,
+      )
+    ).filter(x => x.failedReason);
 
     res.status(200).json({
-      errors: (await getJobs(failedJobIDs)).map((x) => {
-        const error = deserializeTransportableError(x.failedReason) as TransportableError | null;
-        if (error?.code === "SCRAPE_RACED_REDIRECT_ERROR") {
-          return null;
-        }
-        return {
-          id: x.id,
-          timestamp:
-            x.finishedOn !== undefined
-              ? new Date(x.finishedOn).toISOString()
-              : undefined,
-          url: x.data.url,
-          ...(error ? {
-            code: error.code,
-            error: error.message,
-          } : {
-            error: x.failedReason,
-          }),
-        };
-      }).filter((x) => x !== null),
+      errors: failedJobs
+        .map(x => {
+          const error = deserializeTransportableError(
+            x.failedReason!,
+          ) as TransportableError | null;
+          if (error?.code === "SCRAPE_RACED_REDIRECT_ERROR") {
+            return null;
+          }
+          return {
+            id: x.id,
+            timestamp:
+              x.finishedAt !== undefined
+                ? new Date(x.finishedAt).toISOString()
+                : undefined,
+            url: x.data.url,
+            ...(error
+              ? {
+                  code: error.code,
+                  error: error.message,
+                }
+              : {
+                  error: x.failedReason!,
+                }),
+          };
+        })
+        .filter(x => x !== null),
       robotsBlocked: await redisEvictConnection.smembers(
         "crawl:" + req.params.jobId + ":robots_blocked",
       ),
@@ -92,7 +78,7 @@ export async function crawlErrorsController(
       .throwOnError();
 
     if (crawlJobError) {
-      logger.error("Error getting crawl job", { error: crawlJobError });
+      _logger.error("Error getting crawl job", { error: crawlJobError });
       throw crawlJobError;
     }
 
@@ -106,8 +92,9 @@ export async function crawlErrorsController(
     const crawlTtlMs = crawlTtlHours * 60 * 60 * 1000;
 
     if (
-      crawlJob
-      && new Date().valueOf() - new Date(crawlJob.date_added).valueOf() > crawlTtlMs
+      crawlJob &&
+      new Date().valueOf() - new Date(crawlJob.date_added).valueOf() >
+        crawlTtlMs
     ) {
       return res.status(404).json({ success: false, error: "Job expired" });
     }
@@ -116,22 +103,25 @@ export async function crawlErrorsController(
       return res.status(404).json({ success: false, error: "Job not found" });
     }
 
-    const { data: failedJobs, error: failedJobsError } = await supabase_rr_service
-      .from("firecrawl_jobs")
-      .select("*")
-      .eq("crawl_id", req.params.jobId)
-      .eq("team_id", req.auth.team_id)
-      .eq("success", false)
-      .throwOnError();
+    const { data: failedJobs, error: failedJobsError } =
+      await supabase_rr_service
+        .from("firecrawl_jobs")
+        .select("*")
+        .eq("crawl_id", req.params.jobId)
+        .eq("team_id", req.auth.team_id)
+        .eq("success", false)
+        .throwOnError();
 
     if (failedJobsError) {
-      logger.error("Error getting failed jobs", { error: failedJobsError });
+      _logger.error("Error getting failed jobs", { error: failedJobsError });
       throw failedJobsError;
     }
 
     res.status(200).json({
-      errors: (failedJobs || []).map((job) => {
-        const error = deserializeTransportableError(job.message) as TransportableError | null;
+      errors: (failedJobs || []).map(job => {
+        const error = deserializeTransportableError(
+          job.message,
+        ) as TransportableError | null;
         return {
           id: job.job_id,
           timestamp:
@@ -139,12 +129,14 @@ export async function crawlErrorsController(
               ? new Date(job.finishedOn).toISOString()
               : undefined,
           url: job.url,
-          ...(error ? {
-            code: error.code,
-            error: error.message,
-          } : {
-            error: job.message,
-          }),
+          ...(error
+            ? {
+                code: error.code,
+                error: error.message,
+              }
+            : {
+                error: job.message,
+              }),
         };
       }),
       robotsBlocked: await redisEvictConnection.smembers(

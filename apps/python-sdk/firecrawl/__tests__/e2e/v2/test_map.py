@@ -48,6 +48,7 @@ class TestMapE2E:
             include_subdomains=True,            limit=10,
             sitemap=sitemap,
             timeout=15000,
+            integration="_e2e-test",
         )
 
         assert hasattr(resp, "links") and isinstance(resp.links, list)

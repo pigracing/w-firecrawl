@@ -22,6 +22,6 @@ export async function concurrencyCheckController(
   return res.status(200).json({
     success: true,
     concurrency: activeJobsOfTeam.length,
-    maxConcurrency: req.acuc.concurrency,
+    maxConcurrency: req.acuc?.concurrency ?? 0,
   });
 }

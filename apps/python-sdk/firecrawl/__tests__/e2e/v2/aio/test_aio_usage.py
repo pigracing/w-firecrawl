@@ -33,3 +33,10 @@ async def test_async_get_token_usage():
     tokens = await client.get_token_usage()
     assert hasattr(tokens, "remaining_tokens")
 
+
+@pytest.mark.asyncio
+async def test_async_get_queue_status():
+    client = AsyncFirecrawl(api_key=os.getenv("API_KEY"), api_url=os.getenv("API_URL"))
+    status = await client.get_queue_status()
+    assert hasattr(status, "jobs_in_queue")
+

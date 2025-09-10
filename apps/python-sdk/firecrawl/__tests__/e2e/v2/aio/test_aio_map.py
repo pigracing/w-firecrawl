@@ -34,6 +34,7 @@ async def test_async_map_with_all_params(sitemap):
         limit=10,
         sitemap=sitemap,
         timeout=15000,
+        integration="_e2e-test",
     )
     assert hasattr(resp, "links") and isinstance(resp.links, list)
     assert len(resp.links) <= 10

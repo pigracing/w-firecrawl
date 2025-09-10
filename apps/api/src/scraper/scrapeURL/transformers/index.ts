@@ -3,23 +3,28 @@ import { Meta } from "..";
 import { Document } from "../../../controllers/v1/types";
 import { htmlTransform } from "../lib/removeUnwantedElements";
 import { extractLinks } from "../lib/extractLinks";
+import { extractImages } from "../lib/extractImages";
 import { extractMetadata } from "../lib/extractMetadata";
 import { performLLMExtract, performSummary } from "./llmExtract";
 import { uploadScreenshot } from "./uploadScreenshot";
 import { removeBase64Images } from "./removeBase64Images";
 import { performAgent } from "./agent";
+import { performAttributes } from "./performAttributes";
 
 import { deriveDiff } from "./diff";
 import { useIndex } from "../../../services/index";
 import { sendDocumentToIndex } from "../engines/index/index";
-import { hasFormatOfType, hasAnyFormatOfTypes } from "../../../lib/format-utils";
+import {
+  hasFormatOfType,
+  hasAnyFormatOfTypes,
+} from "../../../lib/format-utils";
 
-export type Transformer = (
+type Transformer = (
   meta: Meta,
   document: Document,
 ) => Document | Promise<Document>;
 
-export async function deriveMetadataFromRawHTML(
+async function deriveMetadataFromRawHTML(
   meta: Meta,
   document: Document,
 ): Promise<Document> {
@@ -36,7 +41,7 @@ export async function deriveMetadataFromRawHTML(
   return document;
 }
 
-export async function deriveHTMLFromRawHTML(
+async function deriveHTMLFromRawHTML(
   meta: Meta,
   document: Document,
 ): Promise<Document> {
@@ -48,13 +53,16 @@ export async function deriveHTMLFromRawHTML(
 
   document.html = await htmlTransform(
     document.rawHtml,
-    document.metadata.url ?? document.metadata.sourceURL ?? meta.rewrittenUrl ?? meta.url,
+    document.metadata.url ??
+      document.metadata.sourceURL ??
+      meta.rewrittenUrl ??
+      meta.url,
     meta.options,
   );
   return document;
 }
 
-export async function deriveMarkdownFromHTML(
+async function deriveMarkdownFromHTML(
   meta: Meta,
   document: Document,
 ): Promise<Document> {
@@ -77,31 +85,37 @@ export async function deriveMarkdownFromHTML(
 
   document.markdown = await parseMarkdown(document.html);
 
-  if (meta.options.onlyMainContent === true && 
-      (!document.markdown || document.markdown.trim().length === 0)) {
-    
-    meta.logger.info("Main content extraction resulted in empty markdown, falling back to full content extraction");
-    
+  if (
+    meta.options.onlyMainContent === true &&
+    (!document.markdown || document.markdown.trim().length === 0)
+  ) {
+    meta.logger.info(
+      "Main content extraction resulted in empty markdown, falling back to full content extraction",
+    );
+
     const fallbackMeta = {
       ...meta,
       options: {
         ...meta.options,
-        onlyMainContent: false
-      }
+        onlyMainContent: false,
+      },
     };
-    
+
     document = await deriveHTMLFromRawHTML(fallbackMeta, document);
     document.markdown = await parseMarkdown(document.html);
-    
+
     meta.logger.info("Fallback to full content extraction completed", {
-      markdownLength: document.markdown?.length || 0
+      markdownLength: document.markdown?.length || 0,
     });
   }
 
   return document;
 }
 
-export async function deriveLinksFromHTML(meta: Meta, document: Document): Promise<Document> {
+async function deriveLinksFromHTML(
+  meta: Meta,
+  document: Document,
+): Promise<Document> {
   // Only derive if the formats has links
   if (hasFormatOfType(meta.options.formats, "links")) {
     if (document.html === undefined) {
@@ -110,21 +124,52 @@ export async function deriveLinksFromHTML(meta: Meta, document: Document): Promi
       );
     }
 
-    document.links = await extractLinks(document.html, document.metadata.url ?? document.metadata.sourceURL ?? meta.rewrittenUrl ?? meta.url);
+    document.links = await extractLinks(
+      document.html,
+      document.metadata.url ??
+        document.metadata.sourceURL ??
+        meta.rewrittenUrl ??
+        meta.url,
+    );
   }
 
   return document;
 }
 
-export function coerceFieldsToFormats(
+async function deriveImagesFromHTML(
   meta: Meta,
   document: Document,
-): Document {
+): Promise<Document> {
+  // Only derive if the formats has images
+  if (hasFormatOfType(meta.options.formats, "images")) {
+    if (document.html === undefined) {
+      throw new Error(
+        "html is undefined -- this transformer is being called out of order",
+      );
+    }
+
+    document.images = await extractImages(
+      document.html,
+      document.metadata.url ??
+        document.metadata.sourceURL ??
+        meta.rewrittenUrl ??
+        meta.url,
+    );
+  }
+
+  return document;
+}
+
+function coerceFieldsToFormats(meta: Meta, document: Document): Document {
   const hasMarkdown = hasFormatOfType(meta.options.formats, "markdown");
   const hasRawHtml = hasFormatOfType(meta.options.formats, "rawHtml");
   const hasHtml = hasFormatOfType(meta.options.formats, "html");
   const hasLinks = hasFormatOfType(meta.options.formats, "links");
-  const hasChangeTracking = hasFormatOfType(meta.options.formats, "changeTracking");
+  const hasImages = hasFormatOfType(meta.options.formats, "images");
+  const hasChangeTracking = hasFormatOfType(
+    meta.options.formats,
+    "changeTracking",
+  );
   const hasJson = hasFormatOfType(meta.options.formats, "json");
   const hasScreenshot = hasFormatOfType(meta.options.formats, "screenshot");
   const hasSummary = hasFormatOfType(meta.options.formats, "summary");
@@ -153,18 +198,12 @@ export function coerceFieldsToFormats(
     );
   }
 
-  if (
-    !hasScreenshot &&
-    document.screenshot !== undefined
-  ) {
+  if (!hasScreenshot && document.screenshot !== undefined) {
     meta.logger.warn(
       "Removed screenshot from Document because it wasn't in formats -- this is very wasteful and indicates a bug.",
     );
     delete document.screenshot;
-  } else if (
-    hasScreenshot &&
-    document.screenshot === undefined
-  ) {
+  } else if (hasScreenshot && document.screenshot === undefined) {
     meta.logger.warn(
       "Request had format: screenshot / screenshot@fullPage, but there was no screenshot field in the result.",
     );
@@ -181,10 +220,23 @@ export function coerceFieldsToFormats(
     );
   }
 
+  if (!hasImages && document.images !== undefined) {
+    meta.logger.warn(
+      "Removed images from Document because it wasn't in formats -- this is wasteful and indicates a bug.",
+      { hasImages, hasImagesField: document.images !== undefined },
+    );
+    delete document.images;
+  } else if (hasImages && document.images === undefined) {
+    meta.logger.warn(
+      "Request had format: images, but there was no images field in the result.",
+      { hasImages, hasImagesField: document.images !== undefined },
+    );
+  }
+
   // Handle v1 backward compatibility - don't delete fields based on v1OriginalFormat
   const shouldKeepExtract = meta.internalOptions.v1OriginalFormat === "extract";
   const shouldKeepJson = meta.internalOptions.v1OriginalFormat === "json";
-  
+
   // Debug logging for v1 format investigation
   if (meta.internalOptions.v1OriginalFormat) {
     meta.logger.debug("coerceFieldsToFormats v1 format debug", {
@@ -193,11 +245,14 @@ export function coerceFieldsToFormats(
       shouldKeepExtract,
       shouldKeepJson,
       hasExtractField: document.extract !== undefined,
-      hasJsonField: document.json !== undefined
+      hasJsonField: document.json !== undefined,
     });
   }
-  
-  if (!hasJson && (document.extract !== undefined || document.json !== undefined)) {
+
+  if (
+    !hasJson &&
+    (document.extract !== undefined || document.json !== undefined)
+  ) {
     // For v1 API, keep the field specified by v1OriginalFormat
     if (!shouldKeepExtract && document.extract !== undefined) {
       meta.logger.warn(
@@ -211,7 +266,11 @@ export function coerceFieldsToFormats(
       );
       delete document.json;
     }
-  } else if (hasJson && document.extract === undefined && document.json === undefined) {
+  } else if (
+    hasJson &&
+    document.extract === undefined &&
+    document.json === undefined
+  ) {
     meta.logger.warn(
       "Request had format json, but there was no json field in the result.",
     );
@@ -239,18 +298,22 @@ export function coerceFieldsToFormats(
     );
   }
 
-  if (document.changeTracking && 
-      (!hasChangeTracking?.modes?.includes("git-diff")) && 
-      document.changeTracking.diff !== undefined) {
+  if (
+    document.changeTracking &&
+    !hasChangeTracking?.modes?.includes("git-diff") &&
+    document.changeTracking.diff !== undefined
+  ) {
     meta.logger.warn(
       "Removed diff from changeTracking because git-diff mode wasn't specified in changeTrackingOptions.modes.",
     );
     delete document.changeTracking.diff;
   }
-  
-  if (document.changeTracking && 
-      (!hasChangeTracking?.modes?.includes("json")) && 
-      document.changeTracking.json !== undefined) {
+
+  if (
+    document.changeTracking &&
+    !hasChangeTracking?.modes?.includes("json") &&
+    document.changeTracking.json !== undefined
+  ) {
     meta.logger.warn(
       "Removed structured from changeTracking because structured mode wasn't specified in changeTrackingOptions.modes.",
     );
@@ -265,15 +328,17 @@ export function coerceFieldsToFormats(
 }
 
 // TODO: allow some of these to run in parallel
-export const transformerStack: Transformer[] = [
+const transformerStack: Transformer[] = [
   deriveHTMLFromRawHTML,
   deriveMarkdownFromHTML,
   deriveLinksFromHTML,
+  deriveImagesFromHTML,
   deriveMetadataFromRawHTML,
   uploadScreenshot,
   ...(useIndex ? [sendDocumentToIndex] : []),
   performLLMExtract,
   performSummary,
+  performAttributes,
   performAgent,
   deriveDiff,
   coerceFieldsToFormats,

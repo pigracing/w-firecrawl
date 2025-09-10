@@ -63,7 +63,7 @@ class TestCrawlE2E:
         assert status_job.status in ["scraping", "completed", "failed"]
         assert status_job.completed >= 0
         assert status_job.expires_at is not None
-        assert status_job.next is not None
+        assert status_job.next is None
         assert isinstance(status_job.data, list)
 
     def test_cancel_crawl(self):
@@ -168,7 +168,8 @@ class TestCrawlE2E:
             limit=3,
             max_discovery_depth=2,
             poll_interval=1,
-            timeout=120
+            timeout=120,
+            integration="_e2e-test",
         )
         
         assert crawl_job.status in ["completed", "failed"]
@@ -257,7 +258,8 @@ class TestCrawlE2E:
             max_concurrency=2,
             webhook="https://example.com/hook",
             scrape_options=scrape_opts,
-            zero_data_retention=False
+            zero_data_retention=False,
+            integration="_e2e-test",
         )
         
         assert crawl_job.id is not None

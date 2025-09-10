@@ -13,42 +13,52 @@ import {
   getCrawlQualifiedJobCount,
   getDoneJobsOrderedUntil,
 } from "../../lib/crawl-redis";
-import { getScrapeQueue } from "../../services/queue-service";
 import {
   supabaseGetJobById,
   supabaseGetJobsById,
 } from "../../lib/supabase-jobs";
 import { configDotenv } from "dotenv";
-import type { Job, JobState } from "bullmq";
 import { logger } from "../../lib/logger";
 import { supabase_rr_service, supabase_service } from "../../services/supabase";
 import { getJobFromGCS } from "../../lib/gcs-jobs";
+import { scrapeQueue, NuQJob, NuQJobStatus } from "../../services/worker/nuq";
 configDotenv();
 
 export type PseudoJob<T> = {
-  id: string,
-  getState(): Promise<JobState | "unknown"> | JobState | "unknown",
-  returnvalue: T | null,
-  timestamp: number,
+  id: string;
+  status: NuQJobStatus;
+  returnvalue: T | null;
+  timestamp: number;
   data: {
-    scrapeOptions: any,
-    teamId?: string,
-  },
-  failedReason?: string,
-}
+    scrapeOptions: any;
+    teamId?: string;
+  };
+  failedReason?: string;
+};
 
-export type DBJob = { docs: any, success: boolean, page_options: any, date_added: any, message: string | null, team_id: string }
+export type DBJob = {
+  docs: any;
+  success: boolean;
+  page_options: any;
+  date_added: any;
+  message: string | null;
+  team_id: string;
+};
 
 export async function getJob(id: string): Promise<PseudoJob<any> | null> {
-  const [bullJob, dbJob, gcsJob] = await Promise.all([
-    getScrapeQueue().getJob(id),
-    (process.env.USE_DB_AUTHENTICATION === "true" ? supabaseGetJobById(id) : null) as Promise<DBJob | null>,
-    (process.env.GCS_BUCKET_NAME ? getJobFromGCS(id) : null) as Promise<any | null>,
+  const [nuqJob, dbJob, gcsJob] = await Promise.all([
+    scrapeQueue.getJob(id),
+    (process.env.USE_DB_AUTHENTICATION === "true"
+      ? supabaseGetJobById(id)
+      : null) as Promise<DBJob | null>,
+    (process.env.GCS_BUCKET_NAME ? getJobFromGCS(id) : null) as Promise<
+      any | null
+    >,
   ]);
 
-  if (!bullJob && !dbJob) return null;
+  if (!nuqJob && !dbJob) return null;
 
-  const data = gcsJob ?? dbJob?.docs ?? bullJob?.returnvalue;
+  const data = gcsJob ?? dbJob?.docs ?? nuqJob?.returnvalue;
   if (gcsJob === null && data) {
     logger.warn("GCS Job not found", {
       jobId: id,
@@ -57,33 +67,41 @@ export async function getJob(id: string): Promise<PseudoJob<any> | null> {
 
   const job: PseudoJob<any> = {
     id,
-    getState: dbJob ? (() => dbJob.success ? "completed" : "failed") : bullJob!.getState,
-    returnvalue: Array.isArray(data)
-      ? data[0]
-      : data,
+    status: dbJob ? (dbJob.success ? "completed" : "failed") : nuqJob!.status,
+    returnvalue: Array.isArray(data) ? data[0] : data,
     data: {
-      scrapeOptions: bullJob ? bullJob.data.scrapeOptions : dbJob!.page_options,
+      scrapeOptions: nuqJob ? nuqJob.data.scrapeOptions : dbJob!.page_options,
     },
-    timestamp: bullJob ? bullJob.timestamp : new Date(dbJob!.date_added).valueOf(),
-    failedReason: (bullJob ? bullJob.failedReason : dbJob!.message) || undefined,
-  }
+    timestamp: nuqJob
+      ? nuqJob.createdAt.valueOf()
+      : new Date(dbJob!.date_added).valueOf(),
+    failedReason: (nuqJob ? nuqJob.failedReason : dbJob!.message) || undefined,
+  };
 
   return job;
 }
 
 export async function getJobs(ids: string[]): Promise<PseudoJob<any>[]> {
-  const [bullJobs, dbJobs, gcsJobs] = await Promise.all([
-    Promise.all(ids.map((x) => getScrapeQueue().getJob(x))).then(x => x.filter(x => x)) as Promise<(Job<any, any, string> & { id: string })[]>,
-    process.env.USE_DB_AUTHENTICATION === "true" ? supabaseGetJobsById(ids) : [],
-    process.env.GCS_BUCKET_NAME ? Promise.all(ids.map(async (x) => ({ id: x, job: await getJobFromGCS(x) }))).then(x => x.filter(x => x.job)) as Promise<({ id: string, job: any | null })[]> : [],
+  const [nuqJobs, dbJobs, gcsJobs] = await Promise.all([
+    scrapeQueue.getJobs(ids),
+    process.env.USE_DB_AUTHENTICATION === "true"
+      ? supabaseGetJobsById(ids)
+      : [],
+    process.env.GCS_BUCKET_NAME
+      ? (Promise.all(
+          ids.map(async x => ({ id: x, job: await getJobFromGCS(x) })),
+        ).then(x => x.filter(x => x.job)) as Promise<
+          { id: string; job: any | null }[]
+        >)
+      : [],
   ]);
 
-  const bullJobMap = new Map<string, PseudoJob<any>>();
+  const nuqJobMap = new Map<string, NuQJob<any, any>>();
   const dbJobMap = new Map<string, DBJob>();
   const gcsJobMap = new Map<string, any>();
 
-  for (const job of bullJobs) {
-    bullJobMap.set(job.id, job);
+  for (const job of nuqJobs) {
+    nuqJobMap.set(job.id, job);
   }
 
   for (const job of dbJobs) {
@@ -97,13 +115,13 @@ export async function getJobs(ids: string[]): Promise<PseudoJob<any>[]> {
   const jobs: PseudoJob<any>[] = [];
 
   for (const id of ids) {
-    const bullJob = bullJobMap.get(id);
+    const nuqJob = nuqJobMap.get(id);
     const dbJob = dbJobMap.get(id);
     const gcsJob = gcsJobMap.get(id);
 
-    if (!bullJob && !dbJob) continue;
+    if (!nuqJob && !dbJob) continue;
 
-    const data = gcsJob ?? dbJob?.docs ?? bullJob?.returnvalue;
+    const data = gcsJob ?? dbJob?.docs ?? nuqJob?.returnvalue;
     if (gcsJob === null && data) {
       logger.warn("GCS Job not found", {
         jobId: id,
@@ -112,16 +130,17 @@ export async function getJobs(ids: string[]): Promise<PseudoJob<any>[]> {
 
     const job: PseudoJob<any> = {
       id,
-      getState: dbJob ? (() => dbJob.success ? "completed" : "failed") : (() => bullJob!.getState()),
-      returnvalue: Array.isArray(data)
-        ? data[0]
-        : data,
+      status: dbJob ? (dbJob.success ? "completed" : "failed") : nuqJob!.status,
+      returnvalue: Array.isArray(data) ? data[0] : data,
       data: {
-        scrapeOptions: bullJob ? bullJob.data.scrapeOptions : dbJob!.page_options,
+        scrapeOptions: nuqJob ? nuqJob.data.scrapeOptions : dbJob!.page_options,
       },
-      timestamp: bullJob ? bullJob.timestamp : new Date(dbJob!.date_added).valueOf(),
-      failedReason: (bullJob ? bullJob.failedReason : dbJob!.message) || undefined,
-    }
+      timestamp: nuqJob
+        ? nuqJob.createdAt.valueOf()
+        : new Date(dbJob!.date_added).valueOf(),
+      failedReason:
+        (nuqJob ? nuqJob.failedReason : dbJob!.message) || undefined,
+    };
 
     jobs.push(job);
   }
@@ -140,7 +159,7 @@ export async function crawlStatusController(
     typeof req.query.limit === "string"
       ? start + parseInt(req.query.limit, 10) - 1
       : undefined;
-  
+
   const sc = await getCrawl(req.params.jobId);
 
   const djoCutoff = Date.now() - 250;
@@ -170,7 +189,10 @@ export async function crawlStatusController(
     const crawlTtlHours = req.acuc?.flags?.crawlTtlHours ?? 24;
     const crawlTtlMs = crawlTtlHours * 60 * 60 * 1000;
 
-    if (new Date().valueOf() - new Date(crawlJob.date_added).valueOf() > crawlTtlMs) {
+    if (
+      new Date().valueOf() - new Date(crawlJob.date_added).valueOf() >
+      crawlTtlMs
+    ) {
       return res.status(404).json({ success: false, error: "Job expired" });
     }
   } else {
@@ -179,10 +201,10 @@ export async function crawlStatusController(
   }
 
   let outputBulkA: {
-    status?: "completed" | "scraping" | "cancelled",
-    completed?: number,
-    total?: number,
-    creditsUsed?: number,
+    status?: "completed" | "scraping" | "cancelled";
+    completed?: number;
+    total?: number;
+    creditsUsed?: number;
   };
 
   if (sc) {
@@ -191,22 +213,38 @@ export async function crawlStatusController(
     let total = await getCrawlQualifiedJobCount(req.params.jobId);
 
     let completed = await getDoneJobsOrderedLength(req.params.jobId, djoCutoff);
-    let creditsUsed = completed * (sc.scrapeOptions?.formats?.find(x => typeof x === "object" && x.type === "json") ? 5 : 1);
+    let creditsUsed =
+      completed *
+      (sc.scrapeOptions?.formats?.find(
+        x => typeof x === "object" && x.type === "json",
+      )
+        ? 5
+        : 1);
 
     if (process.env.USE_DB_AUTHENTICATION === "true") {
-      const creditsRpc = await supabase_service
-        .rpc("credits_billed_by_crawl_id_1", {
+      const creditsRpc = await supabase_service.rpc(
+        "credits_billed_by_crawl_id_1",
+        {
           i_crawl_id: req.params.jobId,
-        }, { get: true });
+        },
+        { get: true },
+      );
 
       creditsUsed = creditsRpc.data?.[0]?.credits_billed ?? creditsUsed;
 
-      if (total === 0 && completed === 0 && Date.now() - sc.createdAt > 1000 * 60) {
-        const x = await supabase_service
-          .rpc('crawl_status_job_count_1', {
+      if (
+        total === 0 &&
+        completed === 0 &&
+        Date.now() - sc.createdAt > 1000 * 60
+      ) {
+        const x = await supabase_service.rpc(
+          "crawl_status_job_count_1",
+          {
             i_team_id: req.auth.team_id,
             i_crawl_id: req.params.jobId,
-          }, { get: true });
+          },
+          { get: true },
+        );
 
         total = x.data?.[0]?.count ?? 0;
         completed = total;
@@ -214,30 +252,46 @@ export async function crawlStatusController(
     }
 
     outputBulkA = {
-      status: sc.cancelled ? "cancelled" : (completed === total && kickoffFinished) ? "completed" : "scraping",
+      status: sc.cancelled
+        ? "cancelled"
+        : completed === total && kickoffFinished
+          ? "completed"
+          : "scraping",
       total,
       completed,
       creditsUsed,
     };
-  } else { // DB must be specified at this point, otherwise control flow kills execution earlier
+  } else {
+    // DB must be specified at this point, otherwise control flow kills execution earlier
     // DB mode (once job expires from Redis)
-    const { data: crawlJobCounts, error: crawlJobCountsError } = await supabase_service
-      .rpc('crawl_status_job_count_1', {
-        i_team_id: req.auth.team_id,
-        i_crawl_id: req.params.jobId,
-      }, { get: true });
+    const { data: crawlJobCounts, error: crawlJobCountsError } =
+      await supabase_service.rpc(
+        "crawl_status_job_count_1",
+        {
+          i_team_id: req.auth.team_id,
+          i_crawl_id: req.params.jobId,
+        },
+        { get: true },
+      );
 
     if (crawlJobCountsError || !crawlJobCounts || crawlJobCounts.length === 0) {
-      logger.error("Error getting crawl job count", { error: crawlJobCountsError });
-      throw new Error("Error getting crawl job count", { cause: crawlJobCountsError });
+      logger.error("Error getting crawl job count", {
+        error: crawlJobCountsError,
+      });
+      throw new Error("Error getting crawl job count", {
+        cause: crawlJobCountsError,
+      });
     }
 
     const crawlJobCount: number = crawlJobCounts[0].count ?? 0;
 
-    const creditsRpc = await supabase_service
-        .rpc("credits_billed_by_crawl_id_1", {
-          i_crawl_id: req.params.jobId,
-        }, { get: true });
+    const creditsRpc = await supabase_service.rpc(
+      "credits_billed_by_crawl_id_1",
+      {
+        i_crawl_id: req.params.jobId,
+      },
+      { get: true },
+    );
 
     const creditsUsed = creditsRpc.data?.[0]?.credits_billed ?? crawlJobCount;
 
@@ -250,41 +304,47 @@ export async function crawlStatusController(
   }
 
   let outputBulkB: {
-    data: Document[],
-    next: string | undefined,
+    data: Document[];
+    next: string | undefined;
   };
 
   if (process.env.USE_DB_AUTHENTICATION === "true") {
     // new DB-based path
-    const { data, error } = await supabase_service.rpc("crawl_status_1", {
-      i_team_id: req.auth.team_id,
-      i_crawl_id: req.params.jobId,
-      i_start: start,
-      i_end: end ?? (start + 100),
-    }, { get: true });
+    const { data, error } = await supabase_service.rpc(
+      "crawl_status_1",
+      {
+        i_team_id: req.auth.team_id,
+        i_crawl_id: req.params.jobId,
+        i_start: start,
+        i_end: end ?? start + 100,
+      },
+      { get: true },
+    );
 
     if (error || !data) {
       logger.error("Error getting crawl status from DB", { error });
       throw new Error("Error getting crawl status from DB", { cause: error });
     }
 
-    const scrapeIds = data?.map((x) => x.id) ?? [];
+    const scrapeIds = data?.map(x => x.id) ?? [];
     let scrapes: Document[] = [];
     let iteratedOver = 0;
     let bytes = 0;
     const bytesLimit = 10485760; // 10 MiB in bytes
 
-    const scrapeBlobs = await Promise.all(scrapeIds.map(async (x) => [x, (await getJobFromGCS(x))?.[0]]));
+    const scrapeBlobs = await Promise.all(
+      scrapeIds.map(async x => [x, (await getJobFromGCS(x))?.[0]]),
+    );
 
     for (const [id, scrape] of scrapeBlobs) {
       if (scrape) {
         scrapes.push(scrape);
         bytes += JSON.stringify(scrape).length;
       } else {
-        logger.warn(
-          "Job was considered done, but returnvalue is undefined!",
-          { jobId: id, returnvalue: scrape },
-        );
+        logger.warn("Job was considered done, but returnvalue is undefined!", {
+          jobId: id,
+          returnvalue: scrape,
+        });
       }
 
       iteratedOver++;
@@ -301,38 +361,54 @@ export async function crawlStatusController(
 
     outputBulkB = {
       data: scrapes,
-      next: (outputBulkA.total ?? 0) > (start + iteratedOver)
-        ? `${process.env.ENV === "local" ? req.protocol : "https"}://${req.get("host")}/v1/${isBatch ? "batch/scrape" : "crawl"}/${req.params.jobId}?skip=${start + iteratedOver}${req.query.limit ? `&limit=${req.query.limit}` : ""}`
-        : undefined,
+      next:
+        (outputBulkA.total ?? 0) > start + iteratedOver
+          ? `${process.env.ENV === "local" ? req.protocol : "https"}://${req.get("host")}/v1/${isBatch ? "batch/scrape" : "crawl"}/${req.params.jobId}?skip=${start + iteratedOver}${req.query.limit ? `&limit=${req.query.limit}` : ""}`
+          : undefined,
     };
   } else {
     // old BullMQ-based path
-    const doneJobs = await getDoneJobsOrderedUntil(req.params.jobId, djoCutoff, start, end !== undefined ? end - start : 100);
+    const doneJobs = await getDoneJobsOrderedUntil(
+      req.params.jobId,
+      djoCutoff,
+      start,
+      end !== undefined ? end - start : 100,
+    );
 
     let scrapes: Document[] = [];
     let iteratedOver = 0;
     let bytes = 0;
     const bytesLimit = 10485760; // 10 MiB in bytes
 
-    for (const jobId of doneJobs) {
-      const job = await getScrapeQueue().getJob(jobId);
-      const state = await job?.getState();
+    for (let i = 0; i < Math.ceil(doneJobs.length / 50); i++) {
+      const jobIds = doneJobs.slice(i * 50, (i + 1) * 50);
+      const jobs = await getJobs(jobIds);
 
-      if (state === "failed") {
-        // no iterated over, just ignore
-        continue;
-      } else {
-        if (job?.returnvalue) {
-          scrapes.push(job.returnvalue);
-          bytes += JSON.stringify(job.returnvalue).length;
+      for (const job of jobs) {
+        if (job.status === "failed") {
+          continue;
         } else {
-          logger.warn(
-            "Job was considered done, but returnvalue is undefined!",
-            { scrapeId: jobId, crawlId: req.params.jobId, state, returnvalue: job?.returnvalue },
-          );
+          if (job?.returnvalue) {
+            scrapes.push(job.returnvalue);
+            bytes += JSON.stringify(job.returnvalue).length;
+          } else {
+            logger.warn(
+              "Job was considered done, but returnvalue is undefined!",
+              {
+                scrapeId: job.id,
+                crawlId: req.params.jobId,
+                state: job.status,
+                returnvalue: job?.returnvalue,
+              },
+            );
+          }
+
+          iteratedOver++;
         }
 
-        iteratedOver++;
+        if (bytes > bytesLimit) {
+          break;
+        }
       }
 
       if (bytes > bytesLimit) {
@@ -347,9 +423,10 @@ export async function crawlStatusController(
 
     outputBulkB = {
       data: scrapes,
-      next: (outputBulkA.total ?? 0) > (start + iteratedOver)
-        ? `${process.env.ENV === "local" ? req.protocol : "https"}://${req.get("host")}/v1/${isBatch ? "batch/scrape" : "crawl"}/${req.params.jobId}?skip=${start + iteratedOver}${req.query.limit ? `&limit=${req.query.limit}` : ""}`
-        : undefined,
+      next:
+        (outputBulkA.total ?? 0) > start + iteratedOver
+          ? `${process.env.ENV === "local" ? req.protocol : "https"}://${req.get("host")}/v1/${isBatch ? "batch/scrape" : "crawl"}/${req.params.jobId}?skip=${start + iteratedOver}${req.query.limit ? `&limit=${req.query.limit}` : ""}`
+          : undefined,
     };
   }
 

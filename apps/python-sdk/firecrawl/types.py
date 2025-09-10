@@ -52,7 +52,6 @@ from .v2.types import (
     SearchResultNews,
     SearchResultImages,
     SearchData,
-    SearchResponse,
     
     # Action types
     WaitAction,
@@ -65,6 +64,9 @@ from .v2.types import (
     ExecuteJavascriptAction,
     PDFAction,
     
+    # Usage types
+    QueueStatusResponse,
+
     # Location and format types
     Location,
     
@@ -80,6 +82,7 @@ from .v2.types import (
     
     # Configuration types
     ClientConfig,
+    AgentOptions,
 )
 
 __all__ = [
@@ -130,7 +133,6 @@ __all__ = [
     'SearchResultNews',
     'SearchResultImages',
     'SearchData',
-    'SearchResponse',
     
     # Action types
     'WaitAction',
@@ -142,6 +144,9 @@ __all__ = [
     'ScrapeAction',
     'ExecuteJavascriptAction',
     'PDFAction',
+
+    # Usage types
+    'QueueStatusResponse',
     
     # Location and format types
     'Location',
@@ -158,4 +163,5 @@ __all__ = [
     
     # Configuration types
     'ClientConfig',
-] 
+    'AgentOptions',
+]  

@@ -5,10 +5,13 @@ import {
   type CrawlResponse,
   type Document,
   type CrawlOptions,
+  type PaginationConfig,
 } from "../types";
 import { HttpClient } from "../utils/httpClient";
 import { ensureValidScrapeOptions } from "../utils/validation";
 import { normalizeAxiosError, throwForBadResponse } from "../utils/errorHandler";
+import type { HttpClient as _Http } from "../utils/httpClient";
+import { fetchAllPages } from "../utils/pagination";
 
 export type CrawlRequest = CrawlOptions & {
   url: string;
@@ -30,6 +33,7 @@ function prepareCrawlPayload(request: CrawlRequest): Record<string, unknown> {
   if (request.delay != null) data.delay = request.delay;
   if (request.maxConcurrency != null) data.maxConcurrency = request.maxConcurrency;
   if (request.webhook != null) data.webhook = request.webhook;
+  if (request.integration != null && request.integration.trim()) data.integration = request.integration.trim();
   if (request.scrapeOptions) {
     ensureValidScrapeOptions(request.scrapeOptions);
     data.scrapeOptions = request.scrapeOptions;
@@ -52,21 +56,42 @@ export async function startCrawl(http: HttpClient, request: CrawlRequest): Promi
   }
 }
 
-export async function getCrawlStatus(http: HttpClient, jobId: string): Promise<CrawlJob> {
+export async function getCrawlStatus(
+  http: HttpClient,
+  jobId: string,
+  pagination?: PaginationConfig
+): Promise<CrawlJob> {
   try {
     const res = await http.get<{ success: boolean; status: CrawlJob["status"]; completed?: number; total?: number; creditsUsed?: number; expiresAt?: string; next?: string | null; data?: Document[] }>(`/v2/crawl/${jobId}`);
     if (res.status !== 200 || !res.data?.success) {
       throwForBadResponse(res, "get crawl status");
     }
     const body = res.data;
+    const initialDocs = (body.data || []) as Document[];
+
+    const auto = pagination?.autoPaginate ?? true;
+    if (!auto || !body.next) {
+      return {
+        status: body.status,
+        completed: body.completed ?? 0,
+        total: body.total ?? 0,
+        creditsUsed: body.creditsUsed,
+        expiresAt: body.expiresAt,
+        next: body.next ?? null,
+        data: initialDocs,
+      };
+    }
+
+    const aggregated = await fetchAllPages(http, body.next, initialDocs, pagination);
+
     return {
       status: body.status,
       completed: body.completed ?? 0,
       total: body.total ?? 0,
       creditsUsed: body.creditsUsed,
       expiresAt: body.expiresAt,
-      next: body.next ?? null,
-      data: (body.data || []) as Document[],
+      next: null,
+      data: aggregated,
     };
   } catch (err: any) {
     if (err?.isAxiosError) return normalizeAxiosError(err, "get crawl status");
@@ -141,4 +166,3 @@ export async function crawlParamsPreview(http: HttpClient, url: string, prompt: 
     throw err;
   }
 }
-

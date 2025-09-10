@@ -9,41 +9,19 @@ import {
   Document as V0Document,
   WebSearchResult,
 } from "../../lib/entities";
-import { agentOptionsExtract, ScrapeOptions as V1ScrapeOptions } from "../v1/types";
+import {
+  agentOptionsExtract,
+  AuthCreditUsageChunk,
+  ScrapeOptions as V1ScrapeOptions,
+} from "../v1/types";
 import type { InternalOptions } from "../../scraper/scrapeURL";
 import { ErrorCodes } from "../../lib/error";
 import Ajv from "ajv";
-
-export enum IntegrationEnum {
-  DIFY = "dify",
-  ZAPIER = "zapier",
-  PIPEDREAM = "pipedream",
-  RAYCAST = "raycast",
-  LANGCHAIN = "langchain",
-  CREWAI = "crewai",
-  LLAMAINDEX = "llamaindex",
-  N8N = "n8n",
-  CAMELAI = "camelai",
-  MAKE = "make",
-  FLOWISE = "flowise",
-  METAGPT = "metagpt",
-  RELEVANCEAI = 'relevanceai',
-}
-
-export type Format =
-  | "markdown"
-  | "html"
-  | "rawHtml"
-  | "links"
-  | "screenshot"
-  | "screenshot@fullPage"
-  | "extract"
-  | "json"
-  | "summary"
-  | "changeTracking";
+import { integrationSchema } from "../../utils/integration";
+import { webhookSchema } from "../../services/webhook/schema";
 
 export const url = z.preprocess(
-  (x) => {
+  x => {
     if (!protocolIncluded(x as string)) {
       x = `http://${x}`;
     }
@@ -65,20 +43,20 @@ export const url = z.preprocess(
     .url()
     .regex(/^https?:\/\//i, "URL uses unsupported protocol")
     .refine(
-      (x) =>
+      x =>
         /(\.[a-zA-Z0-9-\u0400-\u04FF\u0500-\u052F\u2DE0-\u2DFF\uA640-\uA69F]{2,}|\.xn--[a-zA-Z0-9-]{1,})(:\d+)?([\/?#]|$)/i.test(
           x,
         ),
       "URL must have a valid top-level domain or be a valid path",
     )
-    .refine((x) => {
+    .refine(x => {
       try {
         checkUrl(x as string);
         return true;
       } catch (_) {
         return false;
       }
-    }, "Invalid URL")
+    }, "Invalid URL"),
   // .refine((x) => !isUrlBlocked(x as string), BLOCKLISTED_URL_MESSAGE),
 );
 
@@ -107,177 +85,276 @@ function calculateTotalWaitTime(
   return waitFor + actionWaitTime;
 }
 
-export const actionSchema = z
-  .union([
-    z
+const actionSchema = z.union([
+  z
+    .object({
+      type: z.literal("wait"),
+      milliseconds: z.number().int().positive().finite().optional(),
+      selector: z.string().optional(),
+    })
+    .refine(
+      data =>
+        (data.milliseconds !== undefined || data.selector !== undefined) &&
+        !(data.milliseconds !== undefined && data.selector !== undefined),
+      {
+        message:
+          "Either 'milliseconds' or 'selector' must be provided, but not both.",
+      },
+    ),
+  z.object({
+    type: z.literal("click"),
+    selector: z.string(),
+    all: z.boolean().default(false),
+  }),
+  z.object({
+    type: z.literal("screenshot"),
+    fullPage: z.boolean().default(false),
+    quality: z.number().min(1).max(100).optional(),
+    viewport: z
       .object({
-        type: z.literal("wait"),
-        milliseconds: z.number().int().positive().finite().optional(),
-        selector: z.string().optional(),
-      })
-      .refine(
-        (data) =>
-          (data.milliseconds !== undefined || data.selector !== undefined) &&
-          !(data.milliseconds !== undefined && data.selector !== undefined),
-        {
-          message:
-            "Either 'milliseconds' or 'selector' must be provided, but not both.",
-        },
-      ),
-    z.object({
-      type: z.literal("click"),
-      selector: z.string(),
-      all: z.boolean().default(false),
-    }),
-    z.object({
-      type: z.literal("screenshot"),
-      fullPage: z.boolean().default(false),
-      quality: z.number().min(1).max(100).optional(),
-      viewport: z.object({
         width: z.number().int().positive().finite().max(7680), // 8K resolution width
         height: z.number().int().positive().finite().max(4320), // 8K resolution height
-      }).optional(),
-    }),
-    z.object({
-      type: z.literal("write"),
-      text: z.string(),
-    }),
-    z.object({
-      type: z.literal("press"),
-      key: z.string(),
-    }),
-    z.object({
-      type: z.literal("scroll"),
-      direction: z.enum(["up", "down"]).optional().default("down"),
-      selector: z.string().optional(),
-    }),
-    z.object({
-      type: z.literal("scrape"),
-    }),
-    z.object({
-      type: z.literal("executeJavascript"),
-      script: z.string(),
-    }),
-    z.object({
-      type: z.literal("pdf"),
-      landscape: z.boolean().default(false),
-      scale: z.number().default(1),
-      format: z.enum(['A0', 'A1', 'A2', 'A3', 'A4', 'A5', 'A6', 'Letter', 'Legal', 'Tabloid', 'Ledger']).default("Letter"),
-    }),
-  ]);
+      })
+      .optional(),
+  }),
+  z.object({
+    type: z.literal("write"),
+    text: z.string(),
+  }),
+  z.object({
+    type: z.literal("press"),
+    key: z.string(),
+  }),
+  z.object({
+    type: z.literal("scroll"),
+    direction: z.enum(["up", "down"]).optional().default("down"),
+    selector: z.string().optional(),
+  }),
+  z.object({
+    type: z.literal("scrape"),
+  }),
+  z.object({
+    type: z.literal("executeJavascript"),
+    script: z.string(),
+  }),
+  z.object({
+    type: z.literal("pdf"),
+    landscape: z.boolean().default(false),
+    scale: z.number().default(1),
+    format: z
+      .enum([
+        "A0",
+        "A1",
+        "A2",
+        "A3",
+        "A4",
+        "A5",
+        "A6",
+        "Letter",
+        "Legal",
+        "Tabloid",
+        "Ledger",
+      ])
+      .default("Letter"),
+  }),
+]);
 
-export type Action = z.infer<typeof actionSchema>;
-
-export const actionsSchema = z
+const actionsSchema = z
   .array(actionSchema)
-  .refine((actions) => actions.length <= MAX_ACTIONS, {
+  .refine(actions => actions.length <= MAX_ACTIONS, {
     message: `Number of actions cannot exceed ${MAX_ACTIONS}`,
   })
   .refine(
-    (actions) =>
-      calculateTotalWaitTime(actions) <= ACTIONS_MAX_WAIT_TIME * 1000,
+    actions => calculateTotalWaitTime(actions) <= ACTIONS_MAX_WAIT_TIME * 1000,
     {
       message: `Total wait time (waitFor + wait actions) cannot exceed ${ACTIONS_MAX_WAIT_TIME} seconds`,
     },
   );
 
-export const jsonFormatWithOptions = z.object({
-  type: z.literal("json"),
-  schema: z.any().optional(),
-  prompt: z.string().max(10000).optional(),
-}).strict();
+const jsonFormatWithOptions = z
+  .object({
+    type: z.literal("json"),
+    schema: z.any().optional(),
+    prompt: z.string().max(10000).optional(),
+  })
+  .strict();
 
 export type JsonFormatWithOptions = z.output<typeof jsonFormatWithOptions>;
 
-export const changeTrackingFormatWithOptions = z.object({
-  type: z.literal("changeTracking"),
-  prompt: z.string().optional(),
-  schema: z.any().optional(),
-  modes: z.enum(["json", "git-diff"]).array().optional().default([]),
-  tag: z.string().or(z.null()).default(null),
-}).strict();
+const changeTrackingFormatWithOptions = z
+  .object({
+    type: z.literal("changeTracking"),
+    prompt: z.string().optional(),
+    schema: z.any().optional(),
+    modes: z.enum(["json", "git-diff"]).array().optional().default([]),
+    tag: z.string().or(z.null()).default(null),
+  })
+  .strict();
 
-export type ChangeTrackingFormatWithOptions = z.output<typeof changeTrackingFormatWithOptions>;
+type ChangeTrackingFormatWithOptions = z.output<
+  typeof changeTrackingFormatWithOptions
+>;
 
-export const screenshotFormatWithOptions = z.object({
+const screenshotFormatWithOptions = z.object({
   type: z.literal("screenshot"),
   fullPage: z.boolean().default(false),
   quality: z.number().min(1).max(100).optional(),
-  viewport: z.object({
-    width: z.number().int().positive().finite().max(7680), // 8K resolution width
-    height: z.number().int().positive().finite().max(4320), // 8K resolution height
-  }).optional(),
+  viewport: z
+    .object({
+      width: z.number().int().positive().finite().max(7680), // 8K resolution width
+      height: z.number().int().positive().finite().max(4320), // 8K resolution height
+    })
+    .optional(),
 });
 
-export type ScreenshotFormatWithOptions = z.output<typeof screenshotFormatWithOptions>;
+type ScreenshotFormatWithOptions = z.output<typeof screenshotFormatWithOptions>;
 
-export type FormatObject = 
+const attributesFormatWithOptions = z
+  .object({
+    type: z.literal("attributes"),
+    selectors: z
+      .array(
+        z.object({
+          selector: z.string().describe("CSS selector to find elements"),
+          attribute: z
+            .string()
+            .describe(
+              "Attribute name to extract (e.g., 'data-vehicle-name' or 'id')",
+            ),
+        }),
+      )
+      .describe("Extract specific attributes from elements"),
+  })
+  .strict();
+
+type AttributesFormatWithOptions = z.output<typeof attributesFormatWithOptions>;
+
+export type FormatObject =
   | { type: "markdown" }
   | { type: "html" }
   | { type: "rawHtml" }
   | { type: "links" }
+  | { type: "images" }
   | { type: "summary" }
   | JsonFormatWithOptions
   | ChangeTrackingFormatWithOptions
-  | ScreenshotFormatWithOptions;
+  | ScreenshotFormatWithOptions
+  | AttributesFormatWithOptions;
 
-export const parsersSchema = z.array(z.enum(["pdf"])).default(["pdf"]);
+const pdfParserWithOptions = z
+  .object({
+    type: z.literal("pdf"),
+    maxPages: z.number().int().positive().finite().max(10000).optional(),
+  })
+  .strict();
 
-export type Parsers = z.infer<typeof parsersSchema>;
+const parsersSchema = z
+  .array(z.union([z.literal("pdf"), pdfParserWithOptions]))
+  .default(["pdf"]);
+
+type Parsers = z.infer<typeof parsersSchema>;
+
+export function shouldParsePDF(parsers?: Parsers): boolean {
+  if (!parsers) return true;
+  return parsers.some(parser => {
+    if (parser === "pdf") return true;
+    if (typeof parser === "object" && parser !== null && "type" in parser) {
+      return (parser as any).type === "pdf";
+    }
+    return false;
+  });
+}
+
+export function getPDFMaxPages(parsers?: Parsers): number | undefined {
+  if (!parsers) return undefined;
+  const pdfParser = parsers.find(parser => {
+    if (typeof parser === "object" && parser !== null && "type" in parser) {
+      return (parser as any).type === "pdf";
+    }
+    return false;
+  });
+  if (pdfParser && typeof pdfParser === "object" && "maxPages" in pdfParser) {
+    return (pdfParser as any).maxPages;
+  }
+  return undefined;
+}
 
 function transformIframeSelector(selector: string): string {
-  return selector.replace(/(?:^|[\s,])iframe(?=\s|$|[.#\[:,])/g, (match) => {
-    const prefix = match.match(/^[\s,]/)?.[0] || '';
+  return selector.replace(/(?:^|[\s,])iframe(?=\s|$|[.#\[:,])/g, match => {
+    const prefix = match.match(/^[\s,]/)?.[0] || "";
     return prefix + 'div[data-original-tag="iframe"]';
   });
 }
 
+const SPECIAL_COUNTRIES = ["us-generic", "us-whitelist"];
+
+const locationSchema = z
+  .object({
+    country: z
+      .string()
+      .optional()
+      .refine(
+        val =>
+          !val ||
+          Object.keys(countries).includes(val.toUpperCase()) ||
+          SPECIAL_COUNTRIES.includes(val.toLowerCase()),
+        "Invalid country code. Use a valid ISO 3166-1 alpha-2 country code.",
+      )
+      .transform(val => {
+        if (!val) return "us-generic";
+        return val.toLowerCase();
+      }),
+    languages: z.array(z.string()).optional(),
+  })
+  .optional();
+
 const baseScrapeOptions = z
   .object({
-    formats: z.preprocess(
-      (val) => {
-        if (!Array.isArray(val)) return val;
-        return val.map(format => {
-          if (typeof format === 'string') {
-            return { type: format };
-          }
-          return format;
-        });
-      },
-      z
-        .union([
-          z.object({ type: z.literal("markdown") }),
-          z.object({ type: z.literal("html") }),
-          z.object({ type: z.literal("rawHtml") }),
-          z.object({ type: z.literal("links") }),
-          z.object({ type: z.literal("summary") }),
-          jsonFormatWithOptions,
-          changeTrackingFormatWithOptions,
-          screenshotFormatWithOptions,
-        ])
-        .array()
-        .optional()
-        .default([{ type: "markdown" }])
-    )
-      .refine(
-        (x) => {
-          return x.filter(f => f.type === "screenshot").length <= 1;
+    formats: z
+      .preprocess(
+        val => {
+          if (!Array.isArray(val)) return val;
+          return val.map(format => {
+            if (typeof format === "string") {
+              return { type: format };
+            }
+            return format;
+          });
         },
-        "You may only specify one screenshot format",
+        z
+          .union([
+            z.object({ type: z.literal("markdown") }),
+            z.object({ type: z.literal("html") }),
+            z.object({ type: z.literal("rawHtml") }),
+            z.object({ type: z.literal("links") }),
+            z.object({ type: z.literal("images") }),
+            z.object({ type: z.literal("summary") }),
+            jsonFormatWithOptions,
+            changeTrackingFormatWithOptions,
+            screenshotFormatWithOptions,
+            attributesFormatWithOptions,
+          ])
+          .array()
+          .optional()
+          .default([{ type: "markdown" }]),
       )
-      .refine(
-        (x) => {
-          const hasChangeTracking = x.find(f => f.type === "changeTracking");
-          const hasMarkdown = x.find(f => f.type === "markdown");
-          return !hasChangeTracking || hasMarkdown;
-        },
-        "The changeTracking format requires the markdown format to be specified as well",
-      ),
+      .refine(x => {
+        return x.filter(f => f.type === "screenshot").length <= 1;
+      }, "You may only specify one screenshot format")
+      .refine(x => {
+        const hasChangeTracking = x.find(f => f.type === "changeTracking");
+        const hasMarkdown = x.find(f => f.type === "markdown");
+        return !hasChangeTracking || hasMarkdown;
+      }, "The changeTracking format requires the markdown format to be specified as well"),
     headers: z.record(z.string(), z.string()).optional(),
-    includeTags: z.string().array()
+    includeTags: z
+      .string()
+      .array()
       .transform(tags => tags.map(transformIframeSelector))
       .optional(),
-    excludeTags: z.string().array()
+    excludeTags: z
+      .string()
+      .array()
       .transform(tags => tags.map(transformIframeSelector))
       .optional(),
     onlyMainContent: z.boolean().default(true),
@@ -293,26 +370,8 @@ const baseScrapeOptions = z
     mobile: z.boolean().default(false),
     parsers: parsersSchema.optional(),
     actions: actionsSchema.optional(),
-    
-    location: z
-      .object({
-        country: z
-          .string()
-          .optional()
-          .refine(
-            (val) =>
-              !val ||
-              Object.keys(countries).includes(val.toUpperCase()) ||
-              val === "US-generic",
-            {
-              message:
-                "Invalid country code. Please use a valid ISO 3166-1 alpha-2 country code.",
-            },
-          )
-          .transform((val) => (val ? val.toUpperCase() : "US-generic")),
-        languages: z.string().array().optional(),
-      })
-      .optional(),
+
+    location: locationSchema,
 
     skipTlsVerification: z.boolean().default(true),
     removeBase64Images: z.boolean().default(true),
@@ -329,9 +388,9 @@ const baseScrapeOptions = z
   })
   .strict(strictMessage);
 
-const waitForRefine = (obj) => {
+const waitForRefine = obj => {
   if (obj.waitFor && obj.timeout) {
-    if (typeof obj.timeout !== 'number' || obj.timeout <= 0) {
+    if (typeof obj.timeout !== "number" || obj.timeout <= 0) {
       return false;
     }
     return obj.waitFor <= obj.timeout / 2;
@@ -342,16 +401,19 @@ const waitForRefineOpts = {
   message: "waitFor must not exceed half of timeout",
   path: ["waitFor"],
 };
-const extractTransform = (obj) => {
+const extractTransform = obj => {
   // Handle timeout
   if (
-    (obj.formats.find(x => typeof x === "object" && x.type === "json")) &&
+    obj.formats.find(x => typeof x === "object" && x.type === "json") &&
     obj.timeout === 30000
   ) {
     obj = { ...obj, timeout: 60000 };
   }
 
-  if (obj.formats?.includes("changeTracking") && (obj.waitFor === undefined || obj.waitFor < 5000)) {
+  if (
+    obj.formats?.includes("changeTracking") &&
+    (obj.waitFor === undefined || obj.waitFor < 5000)
+  ) {
     obj = { ...obj, waitFor: 5000 };
   }
 
@@ -359,8 +421,10 @@ const extractTransform = (obj) => {
     obj = { ...obj, timeout: 60000 };
   }
 
-
-  if ((obj.proxy === "stealth" || obj.proxy === "auto") && obj.timeout === 30000) {
+  if (
+    (obj.proxy === "stealth" || obj.proxy === "auto") &&
+    obj.timeout === 30000
+  ) {
     obj = { ...obj, timeout: 120000 };
   }
 
@@ -370,7 +434,7 @@ const extractTransform = (obj) => {
 export const scrapeOptions = baseScrapeOptions
   .strict(strictMessage)
   .refine(
-    (obj) => {
+    obj => {
       if (!obj.actions) return true;
       return (
         calculateTotalWaitTime(obj.actions, obj.waitFor) <=
@@ -390,7 +454,7 @@ export type ScrapeOptions = BaseScrapeOptions;
 
 const ajv = new Ajv();
 
-export const extractOptions = z
+const extractOptions = z
   .object({
     urls: url
       .array()
@@ -402,7 +466,7 @@ export const extractOptions = z
       .any()
       .optional()
       .refine(
-        (val) => {
+        val => {
           if (!val) return true; // Allow undefined schema
           try {
             const validate = ajv.compile(val);
@@ -420,9 +484,11 @@ export const extractOptions = z
     includeSubdomains: z.boolean().default(true),
     allowExternalLinks: z.boolean().default(false),
     enableWebSearch: z.boolean().default(false),
-    scrapeOptions: baseScrapeOptions.default({ onlyMainContent: false }).optional(),
+    scrapeOptions: baseScrapeOptions
+      .default({ onlyMainContent: false })
+      .optional(),
     origin: z.string().optional().default("api"),
-    integration: z.nativeEnum(IntegrationEnum).optional().transform(val => val || null),
+    integration: integrationSchema.optional().transform(val => val || null),
     urlTrace: z.boolean().default(false),
     timeout: z.number().int().positive().finite().safe().optional(),
     agent: agentOptionsExtract.optional(),
@@ -437,27 +503,27 @@ export const extractOptions = z
       .optional(),
     __experimental_showCostTracking: z.boolean().default(false),
     ignoreInvalidURLs: z.boolean().default(true),
+    webhook: webhookSchema.optional(),
   })
   .strict(strictMessage)
-  .refine((obj) => obj.urls || obj.prompt, {
+  .refine(obj => obj.urls || obj.prompt, {
     message: "Either 'urls' or 'prompt' must be provided.",
   })
-  .transform((obj) => ({
+  .transform(obj => ({
     ...obj,
     allowExternalLinks: obj.allowExternalLinks || obj.enableWebSearch,
   }))
   .refine(
-    (x) => (x.scrapeOptions ? waitForRefine(x.scrapeOptions) : true),
+    x => (x.scrapeOptions ? waitForRefine(x.scrapeOptions) : true),
     waitForRefineOpts,
   )
-  .transform((x) => ({
+  .transform(x => ({
     ...x,
     scrapeOptions: x.scrapeOptions
       ? extractTransform(x.scrapeOptions)
       : x.scrapeOptions,
   }));
 
-export type ExtractOptions = z.infer<typeof extractOptions>;
 export const extractRequestSchema = extractOptions;
 export type ExtractRequest = z.infer<typeof extractRequestSchema>;
 export type ExtractRequestInput = z.input<typeof extractRequestSchema>;
@@ -466,7 +532,7 @@ export const scrapeRequestSchema = baseScrapeOptions
   .extend({
     url,
     origin: z.string().optional().default("api"),
-    integration: z.nativeEnum(IntegrationEnum).optional().transform(val => val || null),
+    integration: integrationSchema.optional().transform(val => val || null),
     zeroDataRetention: z.boolean().optional(),
   })
   .strict(strictMessage)
@@ -476,31 +542,11 @@ export const scrapeRequestSchema = baseScrapeOptions
 export type ScrapeRequest = z.infer<typeof scrapeRequestSchema>;
 export type ScrapeRequestInput = z.input<typeof scrapeRequestSchema>;
 
-export const webhookSchema = z.preprocess(
-  (x) => {
-    if (typeof x === "string") {
-      return { url: x };
-    } else {
-      return x;
-    }
-  },
-  z
-    .object({
-      url: z.string().url(),
-      headers: z.record(z.string(), z.string()).default({}),
-      metadata: z.record(z.string(), z.string()).default({}),
-      events: z
-        .array(z.enum(["completed", "failed", "page", "started"]))
-        .default(["completed", "failed", "page", "started"]),
-    })
-    .strict(strictMessage),
-);
-
 export const batchScrapeRequestSchema = baseScrapeOptions
   .extend({
     urls: url.array(),
     origin: z.string().optional().default("api"),
-    integration: z.nativeEnum(IntegrationEnum).optional().transform(val => val || null),
+    integration: integrationSchema.optional().transform(val => val || null),
     webhook: webhookSchema.optional(),
     appendToId: z.string().uuid().optional(),
     ignoreInvalidURLs: z.boolean().default(true),
@@ -515,7 +561,7 @@ export const batchScrapeRequestSchemaNoURLValidation = baseScrapeOptions
   .extend({
     urls: z.string().array(),
     origin: z.string().optional().default("api"),
-    integration: z.nativeEnum(IntegrationEnum).optional().transform(val => val || null),
+    integration: integrationSchema.optional().transform(val => val || null),
     webhook: webhookSchema.optional(),
     appendToId: z.string().uuid().optional(),
     ignoreInvalidURLs: z.boolean().default(true),
@@ -557,13 +603,13 @@ const crawlerOptions = z
 //   ignoreSitemap?: boolean;
 // };
 
-export type CrawlerOptions = z.infer<typeof crawlerOptions>;
+type CrawlerOptions = z.infer<typeof crawlerOptions>;
 
 export const crawlRequestSchema = crawlerOptions
   .extend({
     url,
     origin: z.string().optional().default("api"),
-    integration: z.nativeEnum(IntegrationEnum).optional().transform(val => val || null),
+    integration: integrationSchema.optional().transform(val => val || null),
     scrapeOptions: baseScrapeOptions.default({}),
     webhook: webhookSchema.optional(),
     limit: z.number().default(10000),
@@ -572,8 +618,8 @@ export const crawlRequestSchema = crawlerOptions
     prompt: z.string().max(10000).optional(),
   })
   .strict(strictMessage)
-  .refine((x) => waitForRefine(x.scrapeOptions), waitForRefineOpts)
-  .transform((x) => {
+  .refine(x => waitForRefine(x.scrapeOptions), waitForRefineOpts)
+  .transform(x => {
     return {
       ...x,
       scrapeOptions: extractTransform(x.scrapeOptions),
@@ -595,21 +641,24 @@ export const crawlRequestSchema = crawlerOptions
 export type CrawlRequest = z.infer<typeof crawlRequestSchema>;
 export type CrawlRequestInput = z.input<typeof crawlRequestSchema>;
 
+export const MAX_MAP_LIMIT = 100000;
+
 export const mapRequestSchema = crawlerOptions
   .omit({ sitemap: true, ignoreQueryParameters: true })
   .extend({
     url,
     origin: z.string().optional().default("api"),
-    integration: z.nativeEnum(IntegrationEnum).optional().transform(val => val || null),
+    integration: integrationSchema.optional().transform(val => val || null),
     includeSubdomains: z.boolean().default(true),
     ignoreQueryParameters: z.boolean().default(true),
     search: z.string().optional(),
     sitemap: z.enum(["only", "include", "skip"]).default("include"),
-    limit: z.number().min(1).max(30000).default(5000),
+    limit: z.number().min(1).max(MAX_MAP_LIMIT).default(5000),
     timeout: z.number().positive().finite().optional(),
     useMock: z.string().optional(),
     filterByPath: z.boolean().default(true),
     useIndex: z.boolean().default(true),
+    location: locationSchema,
   })
   .strict(strictMessage);
 
@@ -629,11 +678,17 @@ export type Document = {
   html?: string;
   rawHtml?: string;
   links?: string[];
+  images?: string[];
   screenshot?: string;
   extract?: any;
   json?: any;
   summary?: string;
   warning?: string;
+  attributes?: {
+    selector: string;
+    attribute: string;
+    values: string[];
+  }[];
   actions?: {
     screenshots?: string[];
     scrapes?: ScrapeActionContent[];
@@ -668,7 +723,7 @@ export type Document = {
       };
     };
     json?: any;
-  }
+  };
   metadata: {
     title?: string;
     description?: string;
@@ -730,17 +785,11 @@ export type ErrorResponse = {
 export type ScrapeResponse =
   | ErrorResponse
   | {
-    success: true;
-    warning?: string;
-    data: Document;
-    scrape_id?: string;
-  };
-
-export interface ScrapeResponseRequestTest {
-  statusCode: number;
-  body: ScrapeResponse;
-  error?: string;
-}
+      success: true;
+      warning?: string;
+      data: Document;
+      scrape_id?: string;
+    };
 
 export interface URLTrace {
   url: string;
@@ -776,28 +825,22 @@ export interface ExtractResponse {
   tokensUsed?: number;
 }
 
-export interface ExtractResponseRequestTest {
-  statusCode: number;
-  body: ExtractResponse;
-  error?: string;
-}
-
 export type CrawlResponse =
   | ErrorResponse
   | {
-    success: true;
-    id: string;
-    url: string;
-  };
+      success: true;
+      id: string;
+      url: string;
+    };
 
 export type BatchScrapeResponse =
   | ErrorResponse
   | {
-    success: true;
-    id: string;
-    url: string;
-    invalidURLs?: string[];
-  };
+      success: true;
+      id: string;
+      url: string;
+      invalidURLs?: string[];
+    };
 
 // Map document interface (transitioned from v1)
 export interface MapDocument {
@@ -810,9 +853,9 @@ export interface MapDocument {
 export type MapResponse =
   | ErrorResponse
   | {
-    success: true;
-    links?: MapDocument[];
-  };
+      success: true;
+      links?: MapDocument[];
+    };
 
 export type CrawlStatusParams = {
   jobId: string;
@@ -825,49 +868,49 @@ export type ConcurrencyCheckParams = {
 export type ConcurrencyCheckResponse =
   | ErrorResponse
   | {
-    success: true;
-    concurrency: number;
-    maxConcurrency: number;
-  };
+      success: true;
+      concurrency: number;
+      maxConcurrency: number;
+    };
 
 export type CrawlStatusResponse =
   | ErrorResponse
   | {
-    success: true;
-    status: "scraping" | "completed" | "failed" | "cancelled";
-    completed: number;
-    total: number;
-    creditsUsed: number;
-    expiresAt: string;
-    next?: string;
-    data: Document[];
-  };
+      success: true;
+      status: "scraping" | "completed" | "failed" | "cancelled";
+      completed: number;
+      total: number;
+      creditsUsed: number;
+      expiresAt: string;
+      next?: string;
+      data: Document[];
+    };
 
 export type OngoingCrawlsResponse =
   | ErrorResponse
   | {
-    success: true;
-    crawls: {
-      id: string;
-      teamId: string;
-      url: string;
-      created_at: string;
-      options: CrawlerOptions;
-    }[];
-  };
+      success: true;
+      crawls: {
+        id: string;
+        teamId: string;
+        url: string;
+        created_at: string;
+        options: CrawlerOptions;
+      }[];
+    };
 
 export type CrawlErrorsResponse =
   | ErrorResponse
   | {
-    errors: {
-      id: string;
-      timestamp?: string;
-      url: string;
-      code?: ErrorCodes;
-      error: string;
-    }[];
-    robotsBlocked: string[];
-  };
+      errors: {
+        id: string;
+        timestamp?: string;
+        url: string;
+        code?: ErrorCodes;
+        error: string;
+      }[];
+      robotsBlocked: string[];
+    };
 
 type AuthObject = {
   team_id: string;
@@ -875,44 +918,6 @@ type AuthObject = {
 
 type Account = {
   remainingCredits: number;
-};
-
-export type AuthCreditUsageChunk = {
-  api_key: string;
-  team_id: string;
-  sub_id: string | null;
-  sub_current_period_start: string | null;
-  sub_current_period_end: string | null;
-  sub_user_id: string | null;
-  price_id: string | null;
-  price_credits: number; // credit limit with assoicated price, or free_credits (500) if free plan
-  price_should_be_graceful: boolean;
-  credits_used: number;
-  coupon_credits: number; // do not rely on this number to be up to date after calling a billTeam
-  adjusted_credits_used: number; // credits this period minus coupons used
-  remaining_credits: number;
-  total_credits_sum: number;
-  plan_priority: {
-    bucketLimit: number;
-    planModifier: number;
-  };
-  rate_limits: {
-    crawl: number;
-    scrape: number;
-    search: number;
-    map: number;
-    extract: number;
-    preview: number;
-    crawlStatus: number;
-    extractStatus: number;
-    extractAgentPreview?: number;
-    scrapeAgentPreview?: number;
-  };
-  concurrency: number;
-  flags: TeamFlags;
-
-  // appended on JS-side
-  is_extract?: boolean;
 };
 
 export type TeamFlags = {
@@ -924,11 +929,10 @@ export type TeamFlags = {
   checkRobotsOnScrape?: boolean;
   allowTeammateInvites?: boolean;
   crawlTtlHours?: number;
+  ipWhitelist?: boolean;
 } | null;
 
-export type AuthCreditUsageChunkFromTeam = Omit<AuthCreditUsageChunk, "api_key">;
-
-export interface RequestWithMaybeACUC<
+interface RequestWithMaybeACUC<
   ReqParams = {},
   ReqBody = undefined,
   ResBody = undefined,
@@ -936,44 +940,13 @@ export interface RequestWithMaybeACUC<
   acuc?: AuthCreditUsageChunk;
 }
 
-export interface RequestWithACUC<
-  ReqParams = {},
-  ReqBody = undefined,
-  ResBody = undefined,
-> extends Request<ReqParams, ReqBody, ResBody> {
-  acuc: AuthCreditUsageChunk;
-}
-
 export interface RequestWithAuth<
-  ReqParams = {},
-  ReqBody = undefined,
-  ResBody = undefined,
-> extends Request<ReqParams, ReqBody, ResBody> {
-  auth: AuthObject;
-  account?: Account;
-}
-
-export interface RequestWithMaybeAuth<
   ReqParams = {},
   ReqBody = undefined,
   ResBody = undefined,
 > extends RequestWithMaybeACUC<ReqParams, ReqBody, ResBody> {
-  auth?: AuthObject;
-  account?: Account;
-}
-
-export interface RequestWithAuth<
-  ReqParams = {},
-  ReqBody = undefined,
-  ResBody = undefined,
-> extends RequestWithACUC<ReqParams, ReqBody, ResBody> {
   auth: AuthObject;
   account?: Account;
-}
-
-export interface ResponseWithSentry<ResBody = undefined>
-  extends Response<ResBody> {
-  sentry?: string;
 }
 
 export function toV0CrawlerOptions(x: CrawlerOptions) {
@@ -1013,10 +986,13 @@ export function toV2CrawlerOptions(x: any): CrawlerOptions {
     regexOnFullURL: x.regexOnFullURL,
     maxDiscoveryDepth: x.maxDiscoveryDepth,
     delay: x.delay,
-  }
+  };
 }
 
-export function fromV0CrawlerOptions(x: any, teamId: string): {
+function fromV0CrawlerOptions(
+  x: any,
+  teamId: string,
+): {
   crawlOptions: CrawlerOptions;
   internalOptions: InternalOptions;
 } {
@@ -1062,18 +1038,18 @@ export function fromV0ScrapeOptions(
         (pageOptions.includeRawHtml ?? false) ? ("rawHtml" as const) : null,
         (pageOptions.screenshot ?? false) ? ("screenshot" as const) : null,
         (pageOptions.fullPageScreenshot ?? false)
-          ? ({ type: "screenshot" as const, fullPage: true })
+          ? { type: "screenshot" as const, fullPage: true }
           : null,
         extractorOptions !== undefined &&
-          extractorOptions.mode.includes("llm-extraction")
-          ? ({
-            type: "json" as const,
-            prompt: extractorOptions.userPrompt,
-            schema: extractorOptions.extractionSchema,
-          })
+        extractorOptions.mode.includes("llm-extraction")
+          ? {
+              type: "json" as const,
+              prompt: extractorOptions.userPrompt,
+              schema: extractorOptions.extractionSchema,
+            }
           : null,
         "links",
-      ].filter((x) => x !== null),
+      ].filter(x => x !== null),
       waitFor: pageOptions.waitFor,
       headers: pageOptions.headers,
       includeTags:
@@ -1086,7 +1062,12 @@ export function fromV0ScrapeOptions(
           : pageOptions.removeTags,
       onlyMainContent: pageOptions.onlyMainContent ?? false,
       timeout: timeout,
-      parsers: pageOptions.parsePDF !== undefined ? (pageOptions.parsePDF ? ["pdf"] : []) : undefined,
+      parsers:
+        pageOptions.parsePDF !== undefined
+          ? pageOptions.parsePDF
+            ? ["pdf"]
+            : []
+          : undefined,
       actions: pageOptions.actions,
       location: pageOptions.geolocation,
       skipTlsVerification: pageOptions.skipTlsVerification,
@@ -1098,9 +1079,12 @@ export function fromV0ScrapeOptions(
       atsv: pageOptions.atsv,
       v0DisableJsDom: pageOptions.disableJsDom,
       teamId,
-      ...(extractorOptions !== undefined && extractorOptions.mode.includes("llm-extraction") ? {
-        v1JSONSystemPrompt: extractorOptions.extractionPrompt
-      } : {})
+      ...(extractorOptions !== undefined &&
+      extractorOptions.mode.includes("llm-extraction")
+        ? {
+            v1JSONSystemPrompt: extractorOptions.extractionPrompt,
+          }
+        : {}),
     },
     // TODO: fallback, fetchPageContent, replaceAllPathsWithAbsolutePaths, includeLinks
   };
@@ -1122,14 +1106,14 @@ export function fromV1ScrapeOptions(
   delete (spreadScrapeOptions as any).maxConcurrency;
   // v2 scrapeOptions schema is strict and does not include `agent`. We carry it via internalOptions below.
   delete (spreadScrapeOptions as any).agent;
-  
+
   delete spreadScrapeOptions.__experimental_cache;
   delete spreadScrapeOptions.jsonOptions;
   delete spreadScrapeOptions.changeTrackingOptions;
   delete spreadScrapeOptions.extract;
   delete spreadScrapeOptions.geolocation;
   delete (spreadScrapeOptions as any).parsePDF;
-  
+
   // Track the original format for v1 backward compatibility
   // Check json first since when user specifies "json", both "json" and "extract" are present
   // When user specifies "extract", only "extract" is present
@@ -1139,60 +1123,72 @@ export function fromV1ScrapeOptions(
   } else if (v1ScrapeOptions.formats.includes("extract")) {
     v1OriginalFormat = "extract";
   }
-  
+
   return {
     scrapeOptions: scrapeOptions.parse({
       ...spreadScrapeOptions,
 
-      ...(v1ScrapeOptions.__experimental_cache ? {
-        maxAge: v1ScrapeOptions.maxAge ?? 4 * 60 * 60 * 1000, // 4 hours
-      } : {}),
+      ...(v1ScrapeOptions.__experimental_cache
+        ? {
+            maxAge: v1ScrapeOptions.maxAge ?? 4 * 60 * 60 * 1000, // 4 hours
+          }
+        : {}),
       location: v1ScrapeOptions.location ?? v1ScrapeOptions.geolocation,
-      formats: v1ScrapeOptions.formats.map(x => {
-        // json and extract is standardized down to extract fmt in v1 -- fine to take one and dismiss the other
-        if (x === "extract") {
-          const opts = v1ScrapeOptions.jsonOptions || v1ScrapeOptions.extract;
-          const fmt: JsonFormatWithOptions = {
-            type: "json",
-            schema: opts?.schema,
-            prompt: opts?.prompt,
-          };
-          return fmt;
-        } else if (x === "json") {
-          // If jsonOptions are provided with json format, create JsonFormatWithOptions
-          const opts = v1ScrapeOptions.jsonOptions;
-          if (opts) {
+      formats: v1ScrapeOptions.formats
+        .map(x => {
+          // json and extract is standardized down to extract fmt in v1 -- fine to take one and dismiss the other
+          if (x === "extract") {
+            const opts = v1ScrapeOptions.jsonOptions || v1ScrapeOptions.extract;
             const fmt: JsonFormatWithOptions = {
               type: "json",
-              schema: opts.schema,
-              prompt: opts.prompt,
+              schema: opts?.schema,
+              prompt: opts?.prompt,
             };
-            return v1ScrapeOptions.formats.includes("extract") ? null : fmt;
+            return fmt;
+          } else if (x === "json") {
+            // If jsonOptions are provided with json format, create JsonFormatWithOptions
+            const opts = v1ScrapeOptions.jsonOptions;
+            if (opts) {
+              const fmt: JsonFormatWithOptions = {
+                type: "json",
+                schema: opts.schema,
+                prompt: opts.prompt,
+              };
+              return v1ScrapeOptions.formats.includes("extract") ? null : fmt;
+            }
+            return null;
+          } else if (x === "changeTracking") {
+            const opts = v1ScrapeOptions.changeTrackingOptions;
+            const fmt: ChangeTrackingFormatWithOptions = {
+              type: "changeTracking",
+              modes: opts?.modes ?? [],
+              tag: opts?.tag ?? null,
+              schema: opts?.schema,
+              prompt: opts?.prompt,
+            };
+            return fmt;
+          } else if (x === "screenshot@fullPage") {
+            return { type: "screenshot" as const, fullPage: true };
+          } else {
+            return x;
           }
-          return null;
-        } else if (x === "changeTracking") {
-          const opts = v1ScrapeOptions.changeTrackingOptions;
-          const fmt: ChangeTrackingFormatWithOptions = {
-            type: "changeTracking",
-            modes: opts?.modes ?? [],
-            tag: opts?.tag ?? null,
-            schema: opts?.schema,
-            prompt: opts?.prompt,
-          };
-          return fmt;
-        } else if (x === "screenshot@fullPage") {
-          return { type: "screenshot" as const, fullPage: true };
-        } else {
-          return x;
-        }
-      }).filter(x => x !== null),
-      parsers: v1ScrapeOptions.parsePDF !== undefined ? (v1ScrapeOptions.parsePDF ? ["pdf"] : []) : undefined,
+        })
+        .filter(x => x !== null),
+      parsers:
+        v1ScrapeOptions.parsePDF !== undefined
+          ? v1ScrapeOptions.parsePDF
+            ? ["pdf"]
+            : []
+          : undefined,
     }),
     internalOptions: {
       teamId,
       v1Agent: v1ScrapeOptions.agent,
-      v1JSONSystemPrompt: (v1ScrapeOptions.jsonOptions || v1ScrapeOptions.extract)?.systemPrompt,
-      v1JSONAgent: (v1ScrapeOptions.jsonOptions || v1ScrapeOptions.extract)?.agent,
+      v1JSONSystemPrompt: (
+        v1ScrapeOptions.jsonOptions || v1ScrapeOptions.extract
+      )?.systemPrompt,
+      v1JSONAgent: (v1ScrapeOptions.jsonOptions || v1ScrapeOptions.extract)
+        ?.agent,
       v1OriginalFormat,
     },
   };
@@ -1215,70 +1211,45 @@ export function fromV0Combo(
   return { scrapeOptions, internalOptions: Object.assign(i1, i2) };
 }
 
-export function toLegacyDocument(
-  document: Document,
-  internalOptions: InternalOptions,
-): V0Document | { url: string } {
-  if (internalOptions.v0CrawlOnlyUrls) {
-    return { url: document.metadata.sourceURL! };
-  }
-
-  return {
-    content: document.markdown!,
-    markdown: document.markdown!,
-    html: document.html,
-    rawHtml: document.rawHtml,
-    linksOnPage: document.links,
-    llm_extraction: document.extract,
-    metadata: {
-      ...document.metadata,
-      error: undefined,
-      statusCode: undefined,
-      pageError: document.metadata.error,
-      pageStatusCode: document.metadata.statusCode,
-      screenshot: document.screenshot,
-    },
-    actions: document.actions,
-    warning: document.warning,
-  };
-}
-
 // Search source type definitions
 // These allow fine-grained control over each search source type
 // Similar to how scrape formats work with jsonFormatWithOptions, etc.
 
-export const webSearchSourceOptions = z.object({
-  type: z.literal("web"),
-  tbs: z.string().optional(), // Time-based search (e.g., "qdr:d" for past day)
-  filter: z.string().optional(), // Search filter
-  lang: z.string().optional(), // Language override for this source
-  country: z.string().optional(), // Country override for this source
-  location: z.string().optional(), // Location override for this source
-}).strict();
+const webSearchSourceOptions = z
+  .object({
+    type: z.literal("web"),
+    tbs: z.string().optional(), // Time-based search (e.g., "qdr:d" for past day)
+    filter: z.string().optional(), // Search filter
+    lang: z.string().optional(), // Language override for this source
+    country: z.string().optional(), // Country override for this source
+    location: z.string().optional(), // Location override for this source
+  })
+  .strict();
 
-export const imagesSearchSourceOptions = z.object({
-  type: z.literal("images"),
-}).strict();
+const imagesSearchSourceOptions = z
+  .object({
+    type: z.literal("images"),
+  })
+  .strict();
 
-export const newsSearchSourceOptions = z.object({
-  type: z.literal("news"),
-}).strict();
-
-export type WebSearchSourceOptions = z.infer<typeof webSearchSourceOptions>;
-export type ImagesSearchSourceOptions = z.infer<typeof imagesSearchSourceOptions>;
-export type NewsSearchSourceOptions = z.infer<typeof newsSearchSourceOptions>;
+const newsSearchSourceOptions = z
+  .object({
+    type: z.literal("news"),
+  })
+  .strict();
 
 // Category source type definitions
-export const githubCategoryOptions = z.object({
-  type: z.literal("github"),
-}).strict();
+const githubCategoryOptions = z
+  .object({
+    type: z.literal("github"),
+  })
+  .strict();
 
-export const researchCategoryOptions = z.object({
-  type: z.literal("research"),
-}).strict();
-
-export type GithubCategoryOptions = z.infer<typeof githubCategoryOptions>;
-export type ResearchCategoryOptions = z.infer<typeof researchCategoryOptions>;
+const researchCategoryOptions = z
+  .object({
+    type: z.literal("research"),
+  })
+  .strict();
 
 export const searchRequestSchema = z
   .object({
@@ -1304,7 +1275,7 @@ export const searchRequestSchema = z
             webSearchSourceOptions,
             imagesSearchSourceOptions,
             newsSearchSourceOptions,
-          ])
+          ]),
         ),
       ])
       .optional()
@@ -1314,88 +1285,82 @@ export const searchRequestSchema = z
         // Array of strings (simple format)
         z.array(z.enum(["github", "research"])),
         // Array of objects (advanced format)
-        z.array(
-          z.union([
-            githubCategoryOptions,
-            researchCategoryOptions,
-          ])
-        ),
+        z.array(z.union([githubCategoryOptions, researchCategoryOptions])),
       ])
       .optional(),
     lang: z.string().optional().default("en"),
     country: z.string().optional().default("us"),
     location: z.string().optional(),
     origin: z.string().optional().default("api"),
-    integration: z.nativeEnum(IntegrationEnum).optional().transform(val => val || null),
+    integration: integrationSchema.optional().transform(val => val || null),
     timeout: z.number().int().positive().finite().safe().default(60000),
     ignoreInvalidURLs: z.boolean().optional().default(false),
     asyncScraping: z.boolean().optional().default(false),
     __searchPreviewToken: z.string().optional(),
     scrapeOptions: baseScrapeOptions
       .extend({
-        formats: z.preprocess(
-          (val) => {
-            if (!Array.isArray(val)) return val;
-            return val.map(format => {
-              if (typeof format === 'string') {
-                return { type: format };
-              }
-              return format;
-            });
-          },
-          z
-            .union([
-              z.object({ type: z.literal("markdown") }),
-              z.object({ type: z.literal("html") }),
-              z.object({ type: z.literal("rawHtml") }),
-              z.object({ type: z.literal("links") }),
-              z.object({ type: z.literal("summary") }),
-              jsonFormatWithOptions,
-              screenshotFormatWithOptions,
-            ])
-            .array()
-            .optional()
-            .default([])
-        )
-          .refine(
-            (x) => {
-              return x.filter(f => f.type === "screenshot").length <= 1;
+        formats: z
+          .preprocess(
+            val => {
+              if (!Array.isArray(val)) return val;
+              return val.map(format => {
+                if (typeof format === "string") {
+                  return { type: format };
+                }
+                return format;
+              });
             },
-            "You may only specify one screenshot format",
-          ),
+            z
+              .union([
+                z.object({ type: z.literal("markdown") }),
+                z.object({ type: z.literal("html") }),
+                z.object({ type: z.literal("rawHtml") }),
+                z.object({ type: z.literal("links") }),
+                z.object({ type: z.literal("images") }),
+                z.object({ type: z.literal("summary") }),
+                jsonFormatWithOptions,
+                screenshotFormatWithOptions,
+              ])
+              .array()
+              .optional()
+              .default([]),
+          )
+          .refine(x => {
+            return x.filter(f => f.type === "screenshot").length <= 1;
+          }, "You may only specify one screenshot format"),
       })
       .default({}),
   })
   .strict(
     "Unrecognized key in body -- please review the v1 API documentation for request body changes",
   )
-  .refine((x) => waitForRefine(x.scrapeOptions), waitForRefineOpts)
-  .transform((x) => {
+  .refine(x => waitForRefine(x.scrapeOptions), waitForRefineOpts)
+  .transform(x => {
     // Transform string array sources to object format
     let sources = x.sources;
     if (sources && Array.isArray(sources) && sources.length > 0) {
       // Check if it's a string array by checking the first element
-      if (typeof sources[0] === 'string') {
+      if (typeof sources[0] === "string") {
         // It's a string array, transform to object array
-        sources = (sources as string[]).map((s) => {
+        sources = (sources as string[]).map(s => {
           switch (s) {
-            case 'web':
+            case "web":
               return {
-                type: 'web' as const,
+                type: "web" as const,
                 tbs: x.tbs,
                 filter: x.filter,
                 lang: x.lang,
                 country: x.country,
                 location: x.location,
               };
-            case 'images':
+            case "images":
               return {
-                type: 'images' as const,
+                type: "images" as const,
                 // Images don't inherit global params in the simple format
               };
-            case 'news':
+            case "news":
               return {
-                type: 'news' as const,
+                type: "news" as const,
                 tbs: x.tbs,
                 lang: x.lang,
                 country: x.country,
@@ -1408,22 +1373,22 @@ export const searchRequestSchema = z
       }
       // Otherwise it's already an object array, keep as is
     }
-    
+
     // Transform string array categories to object format
     let categories = x.categories;
     if (categories && Array.isArray(categories) && categories.length > 0) {
       // Check if it's a string array by checking the first element
-      if (typeof categories[0] === 'string') {
+      if (typeof categories[0] === "string") {
         // It's a string array, transform to object array
-        categories = (categories as string[]).map((c) => {
+        categories = (categories as string[]).map(c => {
           switch (c) {
-            case 'github':
+            case "github":
               return {
-                type: 'github' as const
+                type: "github" as const,
               };
-            case 'research':
+            case "research":
               return {
-                type: 'research' as const,
+                type: "research" as const,
               };
             default:
               return { type: c as any };
@@ -1432,7 +1397,7 @@ export const searchRequestSchema = z
       }
       // Otherwise it's already an object array, keep as is
     }
-    
+
     return {
       ...x,
       sources,
@@ -1447,28 +1412,28 @@ export type SearchRequestInput = z.input<typeof searchRequestSchema>;
 export type SearchResponse =
   | ErrorResponse
   | {
-    success: true;
-    warning?: string;
-    data: Document[];
-    creditsUsed: number;
-  }
+      success: true;
+      warning?: string;
+      data: Document[];
+      creditsUsed: number;
+    }
   | {
-    success: true;
-    warning?: string;
-    data: import("../../lib/entities").SearchV2Response;
-    creditsUsed: number;
-  }
+      success: true;
+      warning?: string;
+      data: import("../../lib/entities").SearchV2Response;
+      creditsUsed: number;
+    }
   | {
-    success: true;
-    warning?: string;
-    data: import("../../lib/entities").SearchV2Response;
-    scrapeIds: {
-      web?: string[];
-      news?: string[];
-      images?: string[];
+      success: true;
+      warning?: string;
+      data: import("../../lib/entities").SearchV2Response;
+      scrapeIds: {
+        web?: string[];
+        news?: string[];
+        images?: string[];
+      };
+      creditsUsed: number;
     };
-    creditsUsed: number;
-  };
 
 export type TokenUsage = {
   promptTokens: number;
@@ -1478,7 +1443,7 @@ export type TokenUsage = {
   model?: string;
 };
 
-export const generateLLMsTextRequestSchema = z.object({
+const generateLLMsTextRequestSchema = z.object({
   url: url.describe("The URL to generate text from"),
   maxUrls: z
     .number()
@@ -1497,6 +1462,4 @@ export const generateLLMsTextRequestSchema = z.object({
   __experimental_stream: z.boolean().optional(),
 });
 
-export type GenerateLLMsTextRequest = z.infer<
-  typeof generateLLMsTextRequestSchema
->;
+type GenerateLLMsTextRequest = z.infer<typeof generateLLMsTextRequestSchema>;

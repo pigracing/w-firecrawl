@@ -1,32 +1,54 @@
 import { Response } from "express";
 import { RequestWithAuth } from "./types";
 import { getExtract, getExtractExpiry } from "../../lib/extract/extract-redis";
-import { DBJob, PseudoJob } from "./crawl-status";
+import { DBJob } from "./crawl-status";
 import { getExtractQueue } from "../../services/queue-service";
 import { ExtractResult } from "../../lib/extract/extraction-service";
 import { supabaseGetJobByIdDirect } from "../../lib/supabase-jobs";
+import { JobState } from "bullmq";
 
-export async function getExtractJob(id: string): Promise<PseudoJob<ExtractResult> | null> {
+type ExtractPseudoJob<T> = {
+  id: string;
+  getState: () => Promise<JobState | "unknown"> | JobState | "unknown";
+  returnvalue: T | null;
+  timestamp: number;
+  data: {
+    scrapeOptions: any;
+    teamId?: string;
+  };
+  failedReason?: string;
+};
+
+async function getExtractJob(
+  id: string,
+): Promise<ExtractPseudoJob<ExtractResult> | null> {
   const [bullJob, dbJob] = await Promise.all([
     getExtractQueue().getJob(id),
-    (process.env.USE_DB_AUTHENTICATION === "true" ? supabaseGetJobByIdDirect(id) : null) as Promise<DBJob | null>,
+    (process.env.USE_DB_AUTHENTICATION === "true"
+      ? supabaseGetJobByIdDirect(id)
+      : null) as Promise<DBJob | null>,
   ]);
 
   if (!bullJob && !dbJob) return null;
 
   const data = dbJob?.docs ?? bullJob?.returnvalue?.data;
 
-  const job: PseudoJob<any> = {
+  const job: ExtractPseudoJob<any> = {
     id,
-    getState: dbJob ? (() => dbJob.success ? "completed" : "failed") : (() => bullJob!.getState()),
+    getState: dbJob
+      ? () => (dbJob.success ? "completed" : "failed")
+      : () => bullJob!.getState(),
     returnvalue: data,
     data: {
       scrapeOptions: bullJob ? bullJob.data.scrapeOptions : dbJob!.page_options,
       teamId: bullJob ? bullJob.data.teamId : dbJob!.team_id,
     },
-    timestamp: bullJob ? bullJob.timestamp : new Date(dbJob!.date_added).valueOf(),
-    failedReason: (bullJob ? bullJob.failedReason : dbJob!.message) || undefined,
-  }
+    timestamp: bullJob
+      ? bullJob.timestamp
+      : new Date(dbJob!.date_added).valueOf(),
+    failedReason:
+      (bullJob ? bullJob.failedReason : dbJob!.message) || undefined,
+  };
 
   return job;
 }
@@ -50,7 +72,10 @@ export async function extractStatusController(
 
   if (!extract || extract.status === "completed") {
     const jobData = await getExtractJob(req.params.jobId);
-    if ((!jobData && !extract) || (jobData && jobData.data.teamId !== req.auth.team_id)) {
+    if (
+      (!jobData && !extract) ||
+      (jobData && jobData.data.teamId !== req.auth.team_id)
+    ) {
       return res.status(404).json({
         success: false,
         error: "Extract job not found",

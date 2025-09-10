@@ -1,47 +1,104 @@
 import robotsParser, { Robot } from "robots-parser";
-import axios from "axios";
-import { axiosTimeout } from "./timeout";
-import https from "https";
 import { Logger } from "winston";
+import { ScrapeOptions, scrapeOptions } from "../controllers/v2/types";
+import { scrapeURL } from "../scraper/scrapeURL";
+import { Engine } from "../scraper/scrapeURL/engines";
+import { CostTracking } from "./cost-tracking";
 
-export interface RobotsTxtChecker {
+const useFireEngine =
+  process.env.FIRE_ENGINE_BETA_URL !== "" &&
+  process.env.FIRE_ENGINE_BETA_URL !== undefined;
+
+interface RobotsTxtChecker {
   robotsTxtUrl: string;
   robotsTxt: string;
   robots: Robot;
 }
 
 export async function fetchRobotsTxt(
-  url: string,
-  skipTlsVerification: boolean = false,
+  {
+    url,
+    zeroDataRetention,
+    location,
+  }: {
+    url: string;
+    zeroDataRetention: boolean;
+    location?: ScrapeOptions["location"];
+  },
+  scrapeId: string,
+  logger: Logger,
   abort?: AbortSignal,
-): Promise<string> {
+): Promise<{ content: string; url: string }> {
   const urlObj = new URL(url);
   const robotsTxtUrl = `${urlObj.protocol}//${urlObj.host}/robots.txt`;
 
-  let extraArgs: any = {};
-  if (skipTlsVerification) {
-    extraArgs.httpsAgent = new https.Agent({
-      rejectUnauthorized: false,
+  const shouldPrioritizeFireEngine = location && useFireEngine;
+
+  const forceEngine: Engine[] = [
+    ...(shouldPrioritizeFireEngine
+      ? [
+          "fire-engine;tlsclient" as const,
+          "fire-engine;tlsclient;stealth" as const,
+        ]
+      : []),
+    "fetch",
+    ...(!shouldPrioritizeFireEngine && useFireEngine
+      ? [
+          "fire-engine;tlsclient" as const,
+          "fire-engine;tlsclient;stealth" as const,
+        ]
+      : []),
+  ];
+
+  let content: string = "";
+  const response = await scrapeURL(
+    "robots-txt;" + scrapeId,
+    robotsTxtUrl,
+    scrapeOptions.parse({
+      formats: ["rawHtml"],
+      timeout: 5000,
+      ...(location ? { location } : {}),
+    }),
+    {
+      forceEngine,
+      v0DisableJsDom: true,
+      externalAbort: abort
+        ? {
+            signal: abort,
+            tier: "external",
+            throwable() {
+              return new Error("Robots.txt fetch aborted");
+            },
+          }
+        : undefined,
+      teamId: "robots-txt",
+      zeroDataRetention,
+    },
+    new CostTracking(),
+  );
+
+  if (
+    response.success &&
+    response.document.metadata.statusCode >= 200 &&
+    response.document.metadata.statusCode < 300
+  ) {
+    content = response.document.rawHtml!;
+  } else {
+    logger.error(`Request failed for robots.txt fetch`, {
+      method: "fetchRobotsTxt",
+      robotsTxtUrl,
+      error: response.success
+        ? response.document.metadata.statusCode
+        : response.error,
     });
+    return { content: "", url: robotsTxtUrl };
   }
 
-  const response = await axios.get(robotsTxtUrl, {
-    timeout: axiosTimeout,
-    signal: abort,
-    ...extraArgs,
-  });
-
-  const contentType = (Object.entries(response.headers).find(
-    (x) => x[0].toLowerCase() === "content-type",
-  ) ?? [])[1] ?? "";
-
-  if ((contentType.includes("text/html") && response.data.trim().startsWith("<")) || 
-      contentType.includes("application/json") ||
-      contentType.includes("application/xml")) {
-    return "";
-  }
-
-  return response.data;
+  // return URL in case we've been redirected
+  return {
+    content: content,
+    url: response.document.metadata.url || robotsTxtUrl,
+  };
 }
 
 export function createRobotsChecker(
@@ -67,7 +124,7 @@ export function isUrlAllowedByRobots(
 
   for (const userAgent of userAgents) {
     let isAllowed = robots.isAllowed(url, userAgent);
-    
+
     // Handle null/undefined responses - default to true (allowed)
     if (isAllowed === null || isAllowed === undefined) {
       isAllowed = true;
@@ -82,11 +139,11 @@ export function isUrlAllowedByRobots(
     if (isAllowed && !url.endsWith("/")) {
       const urlWithSlash = url + "/";
       let isAllowedWithSlash = robots.isAllowed(urlWithSlash, userAgent);
-      
+
       if (isAllowedWithSlash == null) {
         isAllowedWithSlash = true;
       }
-      
+
       // If the trailing slash version is explicitly disallowed, block it
       if (isAllowedWithSlash === false) {
         isAllowed = false;
@@ -100,24 +157,4 @@ export function isUrlAllowedByRobots(
   }
 
   return false;
-}
-
-export async function checkRobotsTxt(
-  url: string,
-  skipTlsVerification: boolean = false,
-  logger?: Logger,
-  abort?: AbortSignal,
-): Promise<boolean> {
-  try {
-    const robotsTxt = await fetchRobotsTxt(url, skipTlsVerification, abort);
-    const checker = createRobotsChecker(url, robotsTxt);
-    return isUrlAllowedByRobots(url, checker.robots);
-  } catch (error) {
-    // If we can't fetch robots.txt, assume it's allowed
-    logger?.debug("Failed to fetch robots.txt, allowing scrape", {
-      error,
-      url,
-    });
-    return true;
-  }
 }

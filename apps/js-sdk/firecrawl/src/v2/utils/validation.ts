@@ -1,5 +1,5 @@
-import { type FormatOption, type JsonFormat, type ScrapeOptions, type ScreenshotFormat } from "../types";
-import zodToJsonSchema from "zod-to-json-schema";
+import { type FormatOption, type JsonFormat, type ScrapeOptions, type ScreenshotFormat, type ChangeTrackingFormat } from "../types";
+import { zodToJsonSchema } from "zod-to-json-schema";
 
 export function ensureValidFormats(formats?: FormatOption[]): void {
   if (!formats) return;
@@ -23,6 +23,19 @@ export function ensureValidFormats(formats?: FormatOption[]): void {
           (j as any).schema = zodToJsonSchema(maybeSchema);
         } catch {
           // If conversion fails, leave as-is; server-side may still handle, or request will fail explicitly
+        }
+      }
+      continue;
+    }
+    if ((fmt as ChangeTrackingFormat).type === "changeTracking") {
+      const ct = fmt as ChangeTrackingFormat;
+      const maybeSchema: any = ct.schema as any;
+      const isZod = !!maybeSchema && (typeof maybeSchema.safeParse === "function" || typeof maybeSchema.parse === "function") && !!maybeSchema._def;
+      if (isZod) {
+        try {
+          (ct as any).schema = zodToJsonSchema(maybeSchema);
+        } catch {
+          // Best-effort conversion; if it fails, leave original value
         }
       }
       continue;

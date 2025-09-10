@@ -71,7 +71,7 @@ def _transform_array(arr: List[Any], result_type: Type[T]) -> List[Union[T, 'Doc
                 "summary" in item or
                 "json" in item
             ):
-                results.append(Document(**item))
+                results.append(Document(**normalize_document_input(item)))
             else:
                 results.append(result_type(**item))
         else:
@@ -193,5 +193,12 @@ def _prepare_search_request(request: SearchRequest) -> Dict[str, Any]:
         if scrape_data:
             data["scrapeOptions"] = scrape_data
         data.pop("scrape_options", None)
+    
+    # Only include integration if it was explicitly provided and non-empty
+    integration_value = getattr(validated_request, "integration", None)
+    if integration_value is not None:
+        integration_str = str(integration_value).strip()
+        if integration_str:
+            data["integration"] = integration_str
     
     return data

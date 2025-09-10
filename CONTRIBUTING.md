@@ -11,6 +11,9 @@ First, start by installing dependencies:
 1. node.js [instructions](https://nodejs.org/en/learn/getting-started/how-to-install-nodejs)
 2. pnpm [instructions](https://pnpm.io/installation)
 3. redis [instructions](https://redis.io/docs/latest/operate/oss_and_stack/install/install-redis/)
+4. postgresql
+
+You need to set up the PostgreSQL database by running the SQL file at `apps/nuq-postgres/nuq.sql`.
 
 Set environment variables in a .env in the /apps/api/ directory you can copy over the template in .env.example.
 
@@ -28,6 +31,9 @@ REDIS_RATE_LIMIT_URL=redis://localhost:6379
 
 ## To turn on DB authentication, you need to set up supabase.
 USE_DB_AUTHENTICATION=false
+
+## Using the PostgreSQL for queuing -- change if credentials, host, or DB is different
+NUQ_DATABASE_URL=postgres://postgres:postgres@localhost:5432/postgres
 
 # ===== Optional ENVS ======
 
@@ -60,7 +66,7 @@ pnpm install # make sure you have pnpm version 9+!
 
 ### Running the project
 
-You're going to need to open 3 terminals. Here is [a video guide accurate as of Oct 2024](https://youtu.be/LHqg5QNI4UY).
+You're going to need to open 3 terminals.
 
 ### Terminal 1 - setting up redis
 
@@ -70,25 +76,16 @@ Run the command anywhere within your project
 redis-server
 ```
 
-### Terminal 2 - setting up workers
+### Terminal 2 - setting up the service
 
 Now, navigate to the apps/api/ directory and run:
 
 ```bash
-pnpm run workers
+pnpm start
 # if you are going to use the [llm-extract feature](https://github.com/firecrawl/firecrawl/pull/586/), you should also export OPENAI_API_KEY=sk-______
 ```
 
 This will start the workers who are responsible for processing crawl jobs.
-
-### Terminal 3 - setting up the main server
-
-To do this, navigate to the apps/api/ directory and run if you don’t have this already, install pnpm here: https://pnpm.io/installation
-Next, run your server with:
-
-```bash
-pnpm run start
-```
 
 ### Terminal 3 - sending our first request.
 
@@ -126,6 +123,4 @@ This will start Redis, the API server, and workers automatically in the correct 
 
 ## Tests:
 
-The best way to do this is run the test with `npm run test:local-no-auth` if you'd like to run the tests without authentication.
-
-If you'd like to run the tests with authentication, run `npm run test:prod`
+The best way to do this is run the test with `npm run test:snips`.

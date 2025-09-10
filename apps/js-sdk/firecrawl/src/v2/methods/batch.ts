@@ -4,9 +4,11 @@ import {
   type CrawlErrorsResponse,
   type Document,
   type BatchScrapeOptions,
+  type PaginationConfig,
 } from "../types";
 import { HttpClient } from "../utils/httpClient";
 import { ensureValidScrapeOptions } from "../utils/validation";
+import { fetchAllPages } from "../utils/pagination";
 import { normalizeAxiosError, throwForBadResponse } from "../utils/errorHandler";
 
 export async function startBatchScrape(
@@ -19,8 +21,8 @@ export async function startBatchScrape(
     ignoreInvalidURLs,
     maxConcurrency,
     zeroDataRetention,
-    integration,
     idempotencyKey,
+    integration,
   }: BatchScrapeOptions = {}
 ): Promise<BatchScrapeResponse> {
   if (!Array.isArray(urls) || urls.length === 0) throw new Error("URLs list cannot be empty");
@@ -34,7 +36,7 @@ export async function startBatchScrape(
   if (ignoreInvalidURLs != null) payload.ignoreInvalidURLs = ignoreInvalidURLs;
   if (maxConcurrency != null) payload.maxConcurrency = maxConcurrency;
   if (zeroDataRetention != null) payload.zeroDataRetention = zeroDataRetention;
-  if (integration != null) payload.integration = integration;
+  if (integration != null && integration.trim()) payload.integration = integration.trim();
 
   try {
     const headers = http.prepareHeaders(idempotencyKey);
@@ -47,19 +49,38 @@ export async function startBatchScrape(
   }
 }
 
-export async function getBatchScrapeStatus(http: HttpClient, jobId: string): Promise<BatchScrapeJob> {
+export async function getBatchScrapeStatus(
+  http: HttpClient,
+  jobId: string,
+  pagination?: PaginationConfig
+): Promise<BatchScrapeJob> {
   try {
     const res = await http.get<{ success: boolean; status: BatchScrapeJob["status"]; completed?: number; total?: number; creditsUsed?: number; expiresAt?: string; next?: string | null; data?: Document[] }>(`/v2/batch/scrape/${jobId}`);
     if (res.status !== 200 || !res.data?.success) throwForBadResponse(res, "get batch scrape status");
     const body = res.data;
+    const initialDocs = (body.data || []) as Document[];
+    const auto = pagination?.autoPaginate ?? true;
+    if (!auto || !body.next) {
+      return {
+        status: body.status,
+        completed: body.completed ?? 0,
+        total: body.total ?? 0,
+        creditsUsed: body.creditsUsed,
+        expiresAt: body.expiresAt,
+        next: body.next ?? null,
+        data: initialDocs,
+      };
+    }
+
+    const aggregated = await fetchAllPages(http, body.next, initialDocs, pagination);
     return {
       status: body.status,
       completed: body.completed ?? 0,
       total: body.total ?? 0,
       creditsUsed: body.creditsUsed,
       expiresAt: body.expiresAt,
-      next: body.next ?? null,
-      data: (body.data || []) as Document[],
+      next: null,
+      data: aggregated,
     };
   } catch (err: any) {
     if (err?.isAxiosError) return normalizeAxiosError(err, "get batch scrape status");
@@ -116,4 +137,3 @@ export function chunkUrls(urls: string[], chunkSize = 100): string[][] {
   for (let i = 0; i < urls.length; i += chunkSize) chunks.push(urls.slice(i, i + chunkSize));
   return chunks;
 }
-

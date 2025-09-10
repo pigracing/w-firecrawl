@@ -83,7 +83,8 @@ To use the API, you need to sign up on [Firecrawl](https://firecrawl.dev) and ge
 - **Media parsing**: pdfs, docx, images
 - **Reliability first**: designed to get the data you need - no matter how hard it is
 - **Actions**: click, scroll, input, wait and more before extracting data
-- **Batching (New)**: scrape thousands of URLs at the same time with a new async endpoint.
+- **Batching**: scrape thousands of URLs at the same time with a new async endpoint
+- **Change Tracking**: monitor and detect changes in website content over time
 
 You can find all of Firecrawl's capabilities and how to use them in our [documentation](https://docs.firecrawl.dev)
 

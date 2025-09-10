@@ -18,6 +18,7 @@ from .types import (
     CrawlResponse,
     CrawlJob,
     CrawlParamsRequest,
+    PDFParser,
     CrawlParamsData,
     WebhookConfig,
     CrawlErrorsResponse,
@@ -35,6 +36,8 @@ from .types import (
     ExecuteJavascriptAction,
     PDFAction,
     Location,
+    PaginationConfig,
+    AgentOptions,
 )
 from .utils.http_client import HttpClient
 from .utils.error_handler import FirecrawlError
@@ -104,7 +107,7 @@ class FirecrawlClient:
         timeout: Optional[int] = None,
         wait_for: Optional[int] = None,
         mobile: Optional[bool] = None,
-        parsers: Optional[List[str]] = None,
+        parsers: Optional[Union[List[str], List[Union[str, PDFParser]]]] = None,
         actions: Optional[List[Union['WaitAction', 'ScreenshotAction', 'ClickAction', 'WriteAction', 'PressAction', 'ScrollAction', 'ScrapeAction', 'ExecuteJavascriptAction', 'PDFAction']]] = None,
         location: Optional['Location'] = None,
         skip_tls_verification: Optional[bool] = None,
@@ -115,6 +118,7 @@ class FirecrawlClient:
         proxy: Optional[str] = None,
         max_age: Optional[int] = None,
         store_in_cache: Optional[bool] = None,
+        integration: Optional[str] = None,
     ) -> Document:
         """
         Scrape a single URL and return the document.
@@ -163,8 +167,9 @@ class FirecrawlClient:
                 proxy=proxy,
                 max_age=max_age,
                 store_in_cache=store_in_cache,
+                integration=integration,
             ).items() if v is not None}
-        ) if any(v is not None for v in [formats, headers, include_tags, exclude_tags, only_main_content, timeout, wait_for, mobile, parsers, actions, location, skip_tls_verification, remove_base64_images, fast_mode, use_mock, block_ads, proxy, max_age, store_in_cache]) else None
+        ) if any(v is not None for v in [formats, headers, include_tags, exclude_tags, only_main_content, timeout, wait_for, mobile, parsers, actions, location, skip_tls_verification, remove_base64_images, fast_mode, use_mock, block_ads, proxy, max_age, store_in_cache, integration]) else None
         return scrape_module.scrape(self.http_client, url, options)
 
     def search(
@@ -179,6 +184,7 @@ class FirecrawlClient:
         ignore_invalid_urls: Optional[bool] = None,
         timeout: Optional[int] = None,
         scrape_options: Optional[ScrapeOptions] = None,
+        integration: Optional[str] = None,
     ) -> SearchData:
         """
         Search for documents.
@@ -204,6 +210,7 @@ class FirecrawlClient:
             ignore_invalid_urls=ignore_invalid_urls,
             timeout=timeout,
             scrape_options=scrape_options,
+            integration=integration,
         )
 
         return search_module.search(self.http_client, request)
@@ -228,7 +235,8 @@ class FirecrawlClient:
         scrape_options: Optional[ScrapeOptions] = None,
         zero_data_retention: bool = False,
         poll_interval: int = 2,
-        timeout: Optional[int] = None
+        timeout: Optional[int] = None,
+        integration: Optional[str] = None,
     ) -> CrawlJob:
         """
         Start a crawl job and wait for it to complete.
@@ -277,7 +285,8 @@ class FirecrawlClient:
             max_concurrency=max_concurrency,
             webhook=webhook,
             scrape_options=scrape_options,
-            zero_data_retention=zero_data_retention
+            zero_data_retention=zero_data_retention,
+            integration=integration,
         )
         
         return crawl_module.crawl(
@@ -305,7 +314,8 @@ class FirecrawlClient:
         max_concurrency: Optional[int] = None,
         webhook: Optional[Union[str, WebhookConfig]] = None,
         scrape_options: Optional[ScrapeOptions] = None,
-        zero_data_retention: bool = False
+        zero_data_retention: bool = False,
+        integration: Optional[str] = None,
     ) -> CrawlResponse:
         """
         Start an asynchronous crawl job.
@@ -351,17 +361,23 @@ class FirecrawlClient:
             max_concurrency=max_concurrency,
             webhook=webhook,
             scrape_options=scrape_options,
-            zero_data_retention=zero_data_retention
+            zero_data_retention=zero_data_retention,
+            integration=integration,
         )
         
         return crawl_module.start_crawl(self.http_client, request)
     
-    def get_crawl_status(self, job_id: str) -> CrawlJob:
+    def get_crawl_status(
+        self, 
+        job_id: str,
+        pagination_config: Optional[PaginationConfig] = None
+    ) -> CrawlJob:
         """
         Get the status of a crawl job.
         
         Args:
             job_id: ID of the crawl job
+            pagination_config: Optional configuration for pagination behavior
             
         Returns:
             CrawlJob with current status and data
@@ -369,7 +385,11 @@ class FirecrawlClient:
         Raises:
             Exception: If the status check fails
         """
-        return crawl_module.get_crawl_status(self.http_client, job_id)
+        return crawl_module.get_crawl_status(
+            self.http_client, 
+            job_id,
+            pagination_config=pagination_config
+        )
     
     def get_crawl_errors(self, crawl_id: str) -> CrawlErrorsResponse:
         """
@@ -410,6 +430,8 @@ class FirecrawlClient:
         limit: Optional[int] = None,
         sitemap: Optional[Literal["only", "include", "skip"]] = None,
         timeout: Optional[int] = None,
+        integration: Optional[str] = None,
+        location: Optional[Location] = None,
     ) -> MapData:
         """Map a URL and return discovered links.
 
@@ -430,7 +452,9 @@ class FirecrawlClient:
             limit=limit,
             sitemap=sitemap if sitemap is not None else "include",
             timeout=timeout,
-        ) if any(v is not None for v in [search, include_subdomains, limit, sitemap, timeout]) else None
+            integration=integration,
+            location=location
+        ) if any(v is not None for v in [search, include_subdomains, limit, sitemap, timeout, integration, location]) else None
 
         return map_module.map(self.http_client, url, options)
     
@@ -471,6 +495,8 @@ class FirecrawlClient:
         show_sources: Optional[bool] = None,
         scrape_options: Optional['ScrapeOptions'] = None,
         ignore_invalid_urls: Optional[bool] = None,
+        integration: Optional[str] = None,
+        agent: Optional[AgentOptions] = None,
     ):
         """Start an extract job (non-blocking).
 
@@ -484,7 +510,8 @@ class FirecrawlClient:
             show_sources: Include per-field/source mapping when available
             scrape_options: Scrape options applied prior to extraction
             ignore_invalid_urls: Skip invalid URLs instead of failing
-
+            integration: Integration tag/name
+            agent: Agent configuration
         Returns:
             Response payload with job id/status (poll with get_extract_status)
         """
@@ -499,6 +526,8 @@ class FirecrawlClient:
             show_sources=show_sources,
             scrape_options=scrape_options,
             ignore_invalid_urls=ignore_invalid_urls,
+            integration=integration,
+            agent=agent,
         )
 
     def extract(
@@ -515,6 +544,8 @@ class FirecrawlClient:
         ignore_invalid_urls: Optional[bool] = None,
         poll_interval: int = 2,
         timeout: Optional[int] = None,
+        integration: Optional[str] = None,
+        agent: Optional[AgentOptions] = None,
     ):
         """Extract structured data and wait until completion.
 
@@ -530,7 +561,8 @@ class FirecrawlClient:
             ignore_invalid_urls: Skip invalid URLs instead of failing
             poll_interval: Seconds between status checks
             timeout: Maximum seconds to wait (None for no timeout)
-
+            integration: Integration tag/name
+            agent: Agent configuration
         Returns:
             Final extract response when completed
         """
@@ -547,6 +579,8 @@ class FirecrawlClient:
             ignore_invalid_urls=ignore_invalid_urls,
             poll_interval=poll_interval,
             timeout=timeout,
+            integration=integration,
+            agent=agent,
         )
 
     def start_batch_scrape(
@@ -561,7 +595,7 @@ class FirecrawlClient:
         timeout: Optional[int] = None,
         wait_for: Optional[int] = None,
         mobile: Optional[bool] = None,
-        parsers: Optional[List[str]] = None,
+        parsers: Optional[Union[List[str], List[Union[str, PDFParser]]]] = None,
         actions: Optional[List[Union['WaitAction', 'ScreenshotAction', 'ClickAction', 'WriteAction', 'PressAction', 'ScrollAction', 'ScrapeAction', 'ExecuteJavascriptAction', 'PDFAction']]] = None,
         location: Optional['Location'] = None,
         skip_tls_verification: Optional[bool] = None,
@@ -651,16 +685,25 @@ class FirecrawlClient:
             idempotency_key=idempotency_key,
         )
 
-    def get_batch_scrape_status(self, job_id: str):
+    def get_batch_scrape_status(
+        self, 
+        job_id: str,
+        pagination_config: Optional[PaginationConfig] = None
+    ):
         """Get current status and any scraped data for a batch job.
 
         Args:
             job_id: Batch job ID
+            pagination_config: Optional configuration for pagination behavior
 
         Returns:
             Status payload including counts and partial data
         """
-        return batch_module.get_batch_scrape_status(self.http_client, job_id)
+        return batch_module.get_batch_scrape_status(
+            self.http_client, 
+            job_id,
+            pagination_config=pagination_config
+        )
 
     def cancel_batch_scrape(self, job_id: str) -> bool:
         """Cancel a running batch scrape job.
@@ -707,6 +750,18 @@ class FirecrawlClient:
         """Get recent token usage metrics (v2)."""
         return usage_methods.get_token_usage(self.http_client)
 
+    def get_credit_usage_historical(self, by_api_key: bool = False):
+        """Get historical credit usage (v2)."""
+        return usage_methods.get_credit_usage_historical(self.http_client, by_api_key)
+
+    def get_token_usage_historical(self, by_api_key: bool = False):
+        """Get historical token usage (v2)."""
+        return usage_methods.get_token_usage_historical(self.http_client, by_api_key)
+
+    def get_queue_status(self):
+        """Get metrics about the team's scrape queue."""
+        return usage_methods.get_queue_status(self.http_client)
+
     def watcher(
         self,
         job_id: str,
@@ -740,7 +795,7 @@ class FirecrawlClient:
         timeout: Optional[int] = None,
         wait_for: Optional[int] = None,
         mobile: Optional[bool] = None,
-        parsers: Optional[List[str]] = None,
+        parsers: Optional[Union[List[str], List[Union[str, PDFParser]]]] = None,
         actions: Optional[List[Union['WaitAction', 'ScreenshotAction', 'ClickAction', 'WriteAction', 'PressAction', 'ScrollAction', 'ScrapeAction', 'ExecuteJavascriptAction', 'PDFAction']]] = None,
         location: Optional['Location'] = None,
         skip_tls_verification: Optional[bool] = None,

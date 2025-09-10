@@ -76,14 +76,14 @@ class TestBatchScrapeRequestPreparation:
             ignore_invalid_urls=True,
             max_concurrency=5,
             zero_data_retention=True,
-            integration="test",
+            integration="_unit-test",
         )
         assert isinstance(data["webhook"], dict) and data["webhook"]["url"] == "https://hook.test"
         assert data["appendToId"] == "00000000-0000-0000-0000-000000000000"
         assert data["ignoreInvalidURLs"] is True
         assert data["maxConcurrency"] == 5
         assert data["zeroDataRetention"] is True
-        assert data["integration"] == "test"
+        assert data["integration"] == "_unit-test"
 
     def test_string_webhook_is_passed_verbatim(self):
         data = prepare_batch_scrape_request(["https://example.com"], webhook="https://hook.simple")

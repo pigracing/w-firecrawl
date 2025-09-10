@@ -12,8 +12,3 @@ export function parseApi(api: string) {
     .replace(/(.{8})(.{4})(.{4})(.{4})(.{12})/, "$1-$2-$3-$4-$5");
   return uuid;
 }
-
-export function uuidToFcUuid(uuid: string) {
-  const uuidWithoutDashes = uuid.replace(/-/g, "");
-  return `fc-${uuidWithoutDashes}`;
-}

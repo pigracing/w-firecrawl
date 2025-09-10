@@ -26,6 +26,9 @@ import {
   idempotencyMiddleware,
   wrap,
 } from "./shared";
+import { queueStatusController } from "../controllers/v2/queue-status";
+import { creditUsageHistoricalController } from "../controllers/v2/credit-usage-historical";
+import { tokenUsageHistoricalController } from "../controllers/v2/token-usage-historical";
 
 expressWs(express());
 
@@ -148,11 +151,16 @@ v2Router.get(
   wrap(extractStatusController),
 );
 
-
 v2Router.get(
   "/team/credit-usage",
   authMiddleware(RateLimiterMode.CrawlStatus),
   wrap(creditUsageController),
+);
+
+v2Router.get(
+  "/team/credit-usage/historical",
+  authMiddleware(RateLimiterMode.CrawlStatus),
+  wrap(creditUsageHistoricalController),
 );
 
 v2Router.get(
@@ -162,7 +170,19 @@ v2Router.get(
 );
 
 v2Router.get(
+  "/team/token-usage/historical",
+  authMiddleware(RateLimiterMode.ExtractStatus),
+  wrap(tokenUsageHistoricalController),
+);
+
+v2Router.get(
   "/concurrency-check",
   authMiddleware(RateLimiterMode.CrawlStatus),
   wrap(concurrencyCheckController),
+);
+
+v2Router.get(
+  "/team/queue-status",
+  authMiddleware(RateLimiterMode.CrawlStatus),
+  wrap(queueStatusController),
 );

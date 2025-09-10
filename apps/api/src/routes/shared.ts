@@ -2,9 +2,9 @@ import { NextFunction, Request, Response } from "express";
 // import { crawlStatusController } from "../../src/controllers/v1/crawl-status";
 import {
   isAgentExtractModelValid,
-  RequestWithACUC,
   RequestWithAuth,
   RequestWithMaybeAuth,
+  RequestWithMaybeACUC,
 } from "../controllers/v1/types";
 import { RateLimiterMode } from "../types";
 import { authenticateUser } from "../controllers/auth";
@@ -16,6 +16,7 @@ import { logger } from "../lib/logger";
 import { BLOCKLISTED_URL_MESSAGE } from "../lib/strings";
 import { addDomainFrequencyJob } from "../services";
 import * as geoip from "geoip-country";
+import { isSelfHosted } from "../lib/deployment";
 
 export function checkCreditsMiddleware(
   _minimum?: number,
@@ -24,14 +25,15 @@ export function checkCreditsMiddleware(
     let minimum = _minimum;
     (async () => {
       if (!minimum && req.body) {
-        minimum =
-          Number((req.body as any)?.limit ?? (req.body as any)?.urls?.length ?? 1);
+        minimum = Number(
+          (req.body as any)?.limit ?? (req.body as any)?.urls?.length ?? 1,
+        );
         if (isNaN(minimum) || !isFinite(minimum) || minimum <= 0) {
           minimum = undefined;
         }
       }
       const { success, remainingCredits, chunk } = await checkTeamCredits(
-        req.acuc,
+        req.acuc ?? null,
         req.auth.team_id,
         minimum ?? 1,
       );
@@ -55,7 +57,7 @@ export function checkCreditsMiddleware(
           return next();
         }
 
-        const currencyName = req.acuc.is_extract ? "tokens" : "credits";
+        const currencyName = req.acuc?.is_extract ? "tokens" : "credits";
         logger.error(
           `Insufficient ${currencyName}: ${JSON.stringify({ team_id: req.auth.team_id, minimum, remainingCredits })}`,
           {
@@ -86,7 +88,7 @@ export function checkCreditsMiddleware(
         }
       }
       next();
-    })().catch((err) => next(err));
+    })().catch(err => next(err));
   };
 }
 
@@ -136,10 +138,14 @@ export function authMiddleware(
       req.auth = { team_id };
       req.acuc = chunk ?? undefined;
       if (chunk) {
-        req.account = { remainingCredits: chunk.remaining_credits };
+        req.account = {
+          remainingCredits: chunk.price_should_be_graceful
+            ? chunk.remaining_credits + chunk.price_credits
+            : chunk.remaining_credits,
+        };
       }
       next();
-    })().catch((err) => next(err));
+    })().catch(err => next(err));
   };
 }
 
@@ -161,10 +167,10 @@ export function idempotencyMiddleware(
       createIdempotencyKey(req);
     }
     next();
-  })().catch((err) => next(err));
+  })().catch(err => next(err));
 }
 export function blocklistMiddleware(
-  req: RequestWithACUC<any, any, any>,
+  req: RequestWithMaybeACUC<any, any, any>,
   res: Response,
   next: NextFunction,
 ) {
@@ -185,46 +191,52 @@ export function blocklistMiddleware(
 export function countryCheck(
   req: RequestWithAuth<any, any, any>,
   res: Response,
-  next: NextFunction
+  next: NextFunction,
 ) {
-  const couldBeRestricted = req.body
-    && (
-      req.body.actions
-      || (req.body.headers && typeof req.body.headers === "object" && Object.keys(req.body.headers).length > 0)
-      || req.body.agent
-      || req.body.jsonOptions?.agent
-      || req.body.extract?.agent
-      || req.body.scrapeOptions?.actions
-      || (req.body.scrapeOptions?.headers && typeof req.body.scrapeOptions.headers === "object" && Object.keys(req.body.scrapeOptions.headers).length > 0)
-      || req.body.scrapeOptions?.agent
-      || req.body.scrapeOptions?.jsonOptions?.agent
-      || req.body.scrapeOptions?.extract?.agent
-    );
-  
+  const couldBeRestricted =
+    req.body &&
+    (req.body.actions ||
+      (req.body.headers &&
+        typeof req.body.headers === "object" &&
+        Object.keys(req.body.headers).length > 0) ||
+      req.body.agent ||
+      req.body.jsonOptions?.agent ||
+      req.body.extract?.agent ||
+      req.body.scrapeOptions?.actions ||
+      (req.body.scrapeOptions?.headers &&
+        typeof req.body.scrapeOptions.headers === "object" &&
+        Object.keys(req.body.scrapeOptions.headers).length > 0) ||
+      req.body.scrapeOptions?.agent ||
+      req.body.scrapeOptions?.jsonOptions?.agent ||
+      req.body.scrapeOptions?.extract?.agent);
+
   if (!couldBeRestricted) {
     return next();
   }
-  
-  const _ip = req.headers["x-forwarded-for"] || req.socket.remoteAddress || "";
-  const ip = Array.isArray(_ip) ? _ip[0] : _ip.split(",")[0];
 
-  if (!ip) {
+  if (!req.ip) {
     logger.warn("IP address not found, unable to check country");
     return next();
   }
 
-  const country = geoip.lookup(ip);
+  const country = geoip.lookup(req.ip);
   if (!country || !country.country) {
-    logger.warn("IP address country data not found", { ip });
+    logger.warn("IP address country data not found", { ip: req.ip });
     return next();
   }
 
   const restricted = process.env.RESTRICTED_COUNTRIES?.split(",") ?? [];
   if (restricted.includes(country.country)) {
-    logger.warn("Denied access to restricted country", { ip, country: country.country, teamId: req.auth.team_id });
+    logger.warn("Denied access to restricted country", {
+      ip: req.ip,
+      country: country.country,
+      teamId: req.auth.team_id,
+    });
     return res.status(403).json({
       success: false,
-      error: "Use of headers, actions, and the FIRE-1 agent is not allowed by default in your country. Please contact us at help@firecrawl.com",
+      error: isSelfHosted()
+        ? "Use of headers, actions, and the FIRE-1 agent is not allowed by default in your country. Please check your server configuration."
+        : "Use of headers, actions, and the FIRE-1 agent is not allowed by default in your country. Please contact us at help@firecrawl.com",
     });
   }
 
@@ -235,6 +247,6 @@ export function wrap(
   controller: (req: Request, res: Response) => Promise<any>,
 ): (req: Request, res: Response, next: NextFunction) => any {
   return (req, res, next) => {
-    controller(req, res).catch((err) => next(err));
+    controller(req, res).catch(err => next(err));
   };
 }

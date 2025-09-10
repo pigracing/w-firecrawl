@@ -9,10 +9,15 @@ import {
 } from "./fire-engine";
 import { pdfMaxReasonableTime, scrapePDF } from "./pdf";
 import { fetchMaxReasonableTime, scrapeURLWithFetch } from "./fetch";
-import { playwrightMaxReasonableTime, scrapeURLWithPlaywright } from "./playwright";
+import {
+  playwrightMaxReasonableTime,
+  scrapeURLWithPlaywright,
+} from "./playwright";
 import { indexMaxReasonableTime, scrapeURLWithIndex } from "./index/index";
 import { useIndex } from "../../../services";
 import { hasFormatOfType } from "../../../lib/format-utils";
+import { getPDFMaxPages } from "../../../controllers/v2/types";
+import { PdfMetadata } from "@mendable/firecrawl-rs";
 
 export type Engine =
   | "fire-engine;chrome-cdp"
@@ -37,7 +42,7 @@ const usePlaywright =
   process.env.PLAYWRIGHT_MICROSERVICE_URL !== "" &&
   process.env.PLAYWRIGHT_MICROSERVICE_URL !== undefined;
 
-export const engines: Engine[] = [
+const engines: Engine[] = [
   ...(useIndex ? ["index" as const, "index;documents" as const] : []),
   ...(useFireEngine
     ? [
@@ -57,7 +62,7 @@ export const engines: Engine[] = [
   "docx",
 ];
 
-export const featureFlags = [
+const featureFlags = [
   "actions",
   "waitFor",
   "screenshot",
@@ -75,7 +80,7 @@ export const featureFlags = [
 
 export type FeatureFlag = (typeof featureFlags)[number];
 
-export const featureFlagOptions: {
+const featureFlagOptions: {
   [F in FeatureFlag]: {
     priority: number;
   };
@@ -109,26 +114,24 @@ export type EngineScrapeResult = {
     scrapes: ScrapeActionContent[];
     javascriptReturns: {
       type: string;
-      value: unknown
+      value: unknown;
     }[];
     pdfs: string[];
   };
 
-  numPages?: number;
+  pdfMetadata?: PdfMetadata;
 
   cacheInfo?: {
     created_at: Date;
   };
-  
+
   contentType?: string;
 
   proxyUsed: "basic" | "stealth";
 };
 
 const engineHandlers: {
-  [E in Engine]: (
-    meta: Meta,
-  ) => Promise<EngineScrapeResult>;
+  [E in Engine]: (meta: Meta) => Promise<EngineScrapeResult>;
 } = {
   index: scrapeURLWithIndex,
   "index;documents": scrapeURLWithIndex,
@@ -149,23 +152,31 @@ const engineHandlers: {
 const engineMRTs: {
   [E in Engine]: (meta: Meta) => number;
 } = {
-  "index": indexMaxReasonableTime,
+  index: indexMaxReasonableTime,
   "index;documents": indexMaxReasonableTime,
-  "fire-engine;chrome-cdp": (meta) => fireEngineMaxReasonableTime(meta, "chrome-cdp"),
-  "fire-engine(retry);chrome-cdp": (meta) => fireEngineMaxReasonableTime(meta, "chrome-cdp"),
-  "fire-engine;chrome-cdp;stealth": (meta) => fireEngineMaxReasonableTime(meta, "chrome-cdp"),
-  "fire-engine(retry);chrome-cdp;stealth": (meta) => fireEngineMaxReasonableTime(meta, "chrome-cdp"),
-  "fire-engine;playwright": (meta) => fireEngineMaxReasonableTime(meta, "playwright"),
-  "fire-engine;playwright;stealth": (meta) => fireEngineMaxReasonableTime(meta, "playwright"),
-  "fire-engine;tlsclient": (meta) => fireEngineMaxReasonableTime(meta, "tlsclient"),
-  "fire-engine;tlsclient;stealth": (meta) => fireEngineMaxReasonableTime(meta, "tlsclient"),
+  "fire-engine;chrome-cdp": meta =>
+    fireEngineMaxReasonableTime(meta, "chrome-cdp"),
+  "fire-engine(retry);chrome-cdp": meta =>
+    fireEngineMaxReasonableTime(meta, "chrome-cdp"),
+  "fire-engine;chrome-cdp;stealth": meta =>
+    fireEngineMaxReasonableTime(meta, "chrome-cdp"),
+  "fire-engine(retry);chrome-cdp;stealth": meta =>
+    fireEngineMaxReasonableTime(meta, "chrome-cdp"),
+  "fire-engine;playwright": meta =>
+    fireEngineMaxReasonableTime(meta, "playwright"),
+  "fire-engine;playwright;stealth": meta =>
+    fireEngineMaxReasonableTime(meta, "playwright"),
+  "fire-engine;tlsclient": meta =>
+    fireEngineMaxReasonableTime(meta, "tlsclient"),
+  "fire-engine;tlsclient;stealth": meta =>
+    fireEngineMaxReasonableTime(meta, "tlsclient"),
   playwright: playwrightMaxReasonableTime,
   fetch: fetchMaxReasonableTime,
   pdf: pdfMaxReasonableTime,
   docx: docxMaxReasonableTime,
 };
 
-export const engineOptions: {
+const engineOptions: {
   [E in Engine]: {
     // A list of feature flags the engine supports.
     features: { [F in FeatureFlag]: boolean };
@@ -348,7 +359,7 @@ export const engineOptions: {
       atsv: true,
       location: true,
       mobile: false,
-      skipTlsVerification: false,
+      skipTlsVerification: true,
       useFastMode: true,
       stealthProxy: false,
       disableAdblock: false,
@@ -366,7 +377,7 @@ export const engineOptions: {
       atsv: true,
       location: true,
       mobile: false,
-      skipTlsVerification: false,
+      skipTlsVerification: true,
       useFastMode: true,
       stealthProxy: true,
       disableAdblock: false,
@@ -435,27 +446,35 @@ export function buildFallbackList(meta: Meta): {
 }[] {
   const _engines: Engine[] = [
     ...engines,
-    
+
     // enable fire-engine in self-hosted testing environment when mocks are supplied
-    ...((!useFireEngine && meta.mock !== null) ? ["fire-engine;chrome-cdp", "fire-engine(retry);chrome-cdp", "fire-engine;chrome-cdp;stealth", "fire-engine(retry);chrome-cdp;stealth", "fire-engine;playwright", "fire-engine;tlsclient", "fire-engine;playwright;stealth", "fire-engine;tlsclient;stealth"] as Engine[] : [])
+    ...(!useFireEngine && meta.mock !== null
+      ? ([
+          "fire-engine;chrome-cdp",
+          "fire-engine(retry);chrome-cdp",
+          "fire-engine;chrome-cdp;stealth",
+          "fire-engine(retry);chrome-cdp;stealth",
+          "fire-engine;playwright",
+          // "fire-engine;tlsclient",
+          // "fire-engine;playwright;stealth",
+          // "fire-engine;tlsclient;stealth",
+        ] as Engine[])
+      : []),
   ];
 
   const shouldUseIndex =
-    useIndex
-    && process.env.FIRECRAWL_INDEX_WRITE_ONLY !== "true"
-    && meta.options.waitFor === 0
-    && !hasFormatOfType(meta.options.formats, "changeTracking")
-    && meta.options.maxAge !== 0
-    && (
-      meta.options.headers === undefined
-      || Object.keys(meta.options.headers).length === 0
-    )
-    && (
-      meta.options.actions === undefined
-      || meta.options.actions.length === 0
-    )
-    && meta.options.proxy !== "stealth";
-  
+    useIndex &&
+    process.env.FIRECRAWL_INDEX_WRITE_ONLY !== "true" &&
+    meta.options.waitFor === 0 &&
+    !hasFormatOfType(meta.options.formats, "changeTracking") &&
+    // Skip index if a non-default PDF maxPages is specified
+    getPDFMaxPages(meta.options.parsers) === undefined &&
+    meta.options.maxAge !== 0 &&
+    (meta.options.headers === undefined ||
+      Object.keys(meta.options.headers).length === 0) &&
+    (meta.options.actions === undefined || meta.options.actions.length === 0) &&
+    meta.options.proxy !== "stealth";
+
   if (!shouldUseIndex) {
     const indexIndex = _engines.indexOf("index");
     if (indexIndex !== -1) {
@@ -466,7 +485,7 @@ export function buildFallbackList(meta: Meta): {
       _engines.splice(indexDocumentsIndex, 1);
     }
   }
-  
+
   const prioritySum = [...meta.featureFlags].reduce(
     (a, x) => a + featureFlagOptions[x].priority,
     0,
@@ -480,7 +499,9 @@ export function buildFallbackList(meta: Meta): {
 
   const currentEngines =
     meta.internalOptions.forceEngine !== undefined
-      ? (Array.isArray(meta.internalOptions.forceEngine) ? meta.internalOptions.forceEngine : [meta.internalOptions.forceEngine])
+      ? Array.isArray(meta.internalOptions.forceEngine)
+        ? meta.internalOptions.forceEngine
+        : [meta.internalOptions.forceEngine]
       : _engines;
 
   for (const engine of currentEngines) {
@@ -508,13 +529,14 @@ export function buildFallbackList(meta: Meta): {
     }
   }
 
-  if (selectedEngines.some((x) => engineOptions[x.engine].quality > 0)) {
+  if (selectedEngines.some(x => engineOptions[x.engine].quality > 0)) {
     selectedEngines = selectedEngines.filter(
-      (x) => engineOptions[x.engine].quality > 0,
+      x => engineOptions[x.engine].quality > 0,
     );
   }
 
-  if (meta.internalOptions.forceEngine === undefined) { // retain force engine order
+  if (meta.internalOptions.forceEngine === undefined) {
+    // retain force engine order
     selectedEngines.sort(
       (a, b) =>
         b.supportScore - a.supportScore ||

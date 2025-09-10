@@ -63,6 +63,7 @@ async def test_async_batch_wait_with_all_params():
         zero_data_retention=False,
         poll_interval=1,
         timeout=180,
+        integration="_e2e-test",
     )
     assert job.status in ("completed", "failed")
 

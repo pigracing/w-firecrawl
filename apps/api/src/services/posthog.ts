@@ -2,7 +2,7 @@ import { PostHog } from "posthog-node";
 import "dotenv/config";
 import { logger } from "../../src/lib/logger";
 
-export default function PostHogClient(apiKey: string) {
+function PostHogClient(apiKey: string) {
   const posthogClient = new PostHog(apiKey, {
     host: process.env.POSTHOG_HOST,
     flushAt: 1,

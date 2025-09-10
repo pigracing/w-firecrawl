@@ -3,12 +3,12 @@ Crawling functionality for Firecrawl v2 API.
 """
 
 import time
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 from ..types import (
     CrawlRequest,
     CrawlJob,
     CrawlResponse, Document, CrawlParamsRequest, CrawlParamsResponse, CrawlParamsData,
-    WebhookConfig, CrawlErrorsResponse, ActiveCrawlsResponse, ActiveCrawl
+    WebhookConfig, CrawlErrorsResponse, ActiveCrawlsResponse, ActiveCrawl, PaginationConfig
 )
 from ..utils import HttpClient, handle_response_error, validate_scrape_options, prepare_scrape_options
 from ..utils.normalize import normalize_document_input
@@ -99,6 +99,9 @@ def _prepare_crawl_request(request: CrawlRequest) -> dict:
     
     # Add any remaining fields that don't need conversion (like limit)
     data.update(request_data)
+    # Trim integration if present
+    if "integration" in data and isinstance(data["integration"], str):
+        data["integration"] = data["integration"].strip()
     
     return data
 
@@ -138,13 +141,18 @@ def start_crawl(client: HttpClient, request: CrawlRequest) -> CrawlResponse:
         raise Exception(response_data.get("error", "Unknown error occurred"))
 
 
-def get_crawl_status(client: HttpClient, job_id: str) -> CrawlJob:
+def get_crawl_status(
+    client: HttpClient, 
+    job_id: str,
+    pagination_config: Optional[PaginationConfig] = None
+) -> CrawlJob:
     """
     Get the status of a crawl job.
     
     Args:
         client: HTTP client instance
         job_id: ID of the crawl job
+        pagination_config: Optional configuration for pagination behavior
         
     Returns:
         CrawlJob with current status and data
@@ -176,6 +184,16 @@ def get_crawl_status(client: HttpClient, job_id: str) -> CrawlJob:
             else:
                 documents.append(Document(**normalize_document_input(doc_data)))
         
+        # Handle pagination if requested
+        auto_paginate = pagination_config.auto_paginate if pagination_config else True
+        if auto_paginate and response_data.get("next") and not (pagination_config and pagination_config.max_results is not None and len(documents) >= pagination_config.max_results):
+            documents = _fetch_all_pages(
+                client, 
+                response_data.get("next"), 
+                documents, 
+                pagination_config
+            )
+        
         # Create CrawlJob with current status and data
         return CrawlJob(
             status=response_data.get("status"),
@@ -183,11 +201,85 @@ def get_crawl_status(client: HttpClient, job_id: str) -> CrawlJob:
             total=response_data.get("total", 0),
             credits_used=response_data.get("creditsUsed", 0),
             expires_at=response_data.get("expiresAt"),
-            next=response_data.get("next", None),
+            next=response_data.get("next", None) if not auto_paginate else None,
             data=documents
         )
     else:
         raise Exception(response_data.get("error", "Unknown error occurred"))
+
+
+def _fetch_all_pages(
+    client: HttpClient,
+    next_url: str,
+    initial_documents: List[Document],
+    pagination_config: Optional[PaginationConfig] = None
+) -> List[Document]:
+    """
+    Fetch all pages of crawl results.
+    
+    Args:
+        client: HTTP client instance
+        next_url: URL for the next page
+        initial_documents: Documents from the first page
+        pagination_config: Optional configuration for pagination limits
+        
+    Returns:
+        List of all documents from all pages
+    """
+    documents = initial_documents.copy()
+    current_url = next_url
+    page_count = 0
+    
+    # Apply pagination limits
+    max_pages = pagination_config.max_pages if pagination_config else None
+    max_results = pagination_config.max_results if pagination_config else None
+    max_wait_time = pagination_config.max_wait_time if pagination_config else None
+    
+    start_time = time.monotonic()
+    
+    while current_url:
+        # Check pagination limits (treat 0 as a valid limit)
+        if (max_pages is not None) and page_count >= max_pages:
+            break
+
+        if (max_wait_time is not None) and (time.monotonic() - start_time) > max_wait_time:
+            break
+        
+        # Fetch next page
+        response = client.get(current_url)
+        
+        if not response.ok:
+            # Log error but continue with what we have
+            import logging
+            logger = logging.getLogger("firecrawl")
+            logger.warning("Failed to fetch next page", extra={"status_code": response.status_code})
+            break
+        
+        page_data = response.json()
+        
+        if not page_data.get("success"):
+            break
+        
+        # Add documents from this page
+        data_list = page_data.get("data", [])
+        for doc_data in data_list:
+            if isinstance(doc_data, str):
+                continue
+            else:
+                # Check max_results limit BEFORE adding each document
+                if max_results is not None and len(documents) >= max_results:
+                    break
+                documents.append(Document(**normalize_document_input(doc_data)))
+        
+        # Check if we hit max_results limit
+        if max_results is not None and len(documents) >= max_results:
+            break
+        
+        # Get next URL
+        current_url = page_data.get("next")
+        page_count += 1
+    
+    return documents
 
 
 def cancel_crawl(client: HttpClient, job_id: str) -> bool:
@@ -235,7 +327,7 @@ def wait_for_crawl_completion(
         Exception: If the job fails
         TimeoutError: If timeout is reached
     """
-    start_time = time.time()
+    start_time = time.monotonic()
     
     while True:
         crawl_job = get_crawl_status(client, job_id)
@@ -245,7 +337,7 @@ def wait_for_crawl_completion(
             return crawl_job
         
         # Check timeout
-        if timeout and (time.time() - start_time) > timeout:
+        if timeout is not None and (time.monotonic() - start_time) > timeout:
             raise TimeoutError(f"Crawl job {job_id} did not complete within {timeout} seconds")
         
         # Wait before next poll

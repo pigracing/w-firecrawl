@@ -15,13 +15,6 @@ const createRateLimiter = (keyPrefix, points) =>
     duration: 60, // Duration in seconds
   });
 
-export const testSuiteRateLimiter = new RateLimiterRedis({
-  storeClient: redisRateLimitClient,
-  keyPrefix: "test-suite",
-  points: 10000,
-  duration: 60, // Duration in seconds
-});
-
 const fallbackRateLimits: AuthCreditUsageChunk["rate_limits"] = {
   crawl: 15,
   scrape: 100,
@@ -41,6 +34,6 @@ export function getRateLimiter(
 ): RateLimiterRedis {
   return createRateLimiter(
     `${mode}`,
-    (rate_limits?.[mode] ?? fallbackRateLimits?.[mode] ?? 500),
+    rate_limits?.[mode] ?? fallbackRateLimits?.[mode] ?? 500,
   );
 }

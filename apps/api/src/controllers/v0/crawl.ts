@@ -27,10 +27,11 @@ import { redisEvictConnection } from "../../../src/services/redis";
 import { checkAndUpdateURL } from "../../../src/lib/validateUrl";
 import * as Sentry from "@sentry/node";
 import { getJobPriority } from "../../lib/job-priority";
-import { fromLegacyScrapeOptions, url as urlSchema } from "../v1/types";
+import { url as urlSchema } from "../v1/types";
 import { ZodError } from "zod";
 import { BLOCKLISTED_URL_MESSAGE } from "../../lib/strings";
 import { fromV0ScrapeOptions } from "../v2/types";
+import { isSelfHosted } from "../../lib/deployment";
 
 export async function crawlController(req: Request, res: Response) {
   try {
@@ -42,16 +43,29 @@ export async function crawlController(req: Request, res: Response) {
     const { team_id, chunk } = auth;
 
     if (chunk?.flags?.forceZDR) {
-      return res.status(400).json({ error: "Your team has zero data retention enabled. This is not supported on the v0 API. Please update your code to use the v1 API." });
+      return res.status(400).json({
+        error:
+          "Your team has zero data retention enabled. This is not supported on the v0 API. Please update your code to use the v1 API.",
+      });
     }
 
     const id = uuidv4();
 
-    redisEvictConnection.sadd("teams_using_v0", team_id)
-      .catch(error => logger.error("Failed to add team to teams_using_v0", { error, team_id }));
-    
-    redisEvictConnection.sadd("teams_using_v0:" + team_id, "crawl:" + id)
-      .catch(error => logger.error("Failed to add team to teams_using_v0 (2)", { error, team_id }));
+    redisEvictConnection.sadd("teams_using_v0", team_id).catch(error =>
+      logger.error("Failed to add team to teams_using_v0", {
+        error,
+        team_id,
+      }),
+    );
+
+    redisEvictConnection
+      .sadd("teams_using_v0:" + team_id, "crawl:" + id)
+      .catch(error =>
+        logger.error("Failed to add team to teams_using_v0 (2)", {
+          error,
+          team_id,
+        }),
+      );
 
     if (req.headers["x-idempotency-key"]) {
       const isIdempotencyValid = await validateIdempotencyKey(req);
@@ -101,8 +115,9 @@ export async function crawlController(req: Request, res: Response) {
 
     if (!creditsCheckSuccess) {
       return res.status(402).json({
-        error:
-          "Insufficient credits. You may be requesting with a higher limit than the amount of credits you have left. If not, upgrade your plan at https://firecrawl.dev/pricing or contact us at help@firecrawl.com",
+        error: isSelfHosted()
+          ? "Insufficient credits. You may be requesting with a higher limit than the amount of credits you have left. Please check your server configuration."
+          : "Insufficient credits. You may be requesting with a higher limit than the amount of credits you have left. If not, upgrade your plan at https://firecrawl.dev/pricing or contact us at help@firecrawl.com",
       });
     }
 
@@ -163,10 +178,13 @@ export async function crawlController(req: Request, res: Response) {
       pageOptions,
       undefined,
       undefined,
-      team_id
+      team_id,
     );
     internalOptions.disableSmartWaitCache = true; // NOTE: smart wait disabled for crawls to ensure contentful scrape, speed does not matter
-    internalOptions.saveScrapeResultToGCS = process.env.GCS_FIRE_ENGINE_BUCKET_NAME ? true : false;
+    internalOptions.saveScrapeResultToGCS = process.env
+      .GCS_FIRE_ENGINE_BUCKET_NAME
+      ? true
+      : false;
     delete (scrapeOptions as any).timeout;
 
     const sc: StoredCrawl = {
@@ -190,17 +208,17 @@ export async function crawlController(req: Request, res: Response) {
 
     const sitemap = sc.crawlerOptions.ignoreSitemap
       ? 0
-      : await crawler.tryGetSitemap(async (urls) => {
+      : await crawler.tryGetSitemap(async urls => {
           if (urls.length === 0) return;
 
           let jobPriority = await getJobPriority({
             team_id,
             basePriority: 21,
           });
-          const jobs = urls.map((url) => {
+          const jobs = urls.map(url => {
             const uuid = uuidv4();
             return {
-              name: uuid,
+              jobId: uuid,
               data: {
                 url,
                 mode: "single_urls" as const,
@@ -213,28 +231,26 @@ export async function crawlController(req: Request, res: Response) {
                 crawl_id: id,
                 sitemapped: true,
                 zeroDataRetention: false, // not supported on v0
+                apiKeyId: chunk?.api_key_id ?? null,
               },
-              opts: {
-                jobId: uuid,
-                priority: jobPriority,
-              },
+              priority: jobPriority,
             };
           });
 
           await lockURLs(
             id,
             sc,
-            jobs.map((x) => x.data.url),
+            jobs.map(x => x.data.url),
             logger,
           );
           await addCrawlJobs(
             id,
-            jobs.map((x) => x.opts.jobId),
+            jobs.map(x => x.jobId),
             logger,
           );
           for (const job of jobs) {
             // add with sentry instrumentation
-            await addScrapeJob(job.data, {}, job.opts.jobId);
+            await addScrapeJob(job.data, job.jobId, job.priority);
           }
         });
 
@@ -257,11 +273,10 @@ export async function crawlController(req: Request, res: Response) {
           integration: req.body.integration,
           crawl_id: id,
           zeroDataRetention: false, // not supported on v0
-        },
-        {
-          priority: 15, // prioritize request 0 of crawl jobs same as scrape jobs
+          apiKeyId: chunk?.api_key_id ?? null,
         },
         jobId,
+        await getJobPriority({ team_id, basePriority: 15 }),
       );
       await addCrawlJob(id, jobId, logger);
     }

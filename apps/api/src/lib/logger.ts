@@ -4,7 +4,7 @@ import { configDotenv } from "dotenv";
 configDotenv();
 
 const logFormat = winston.format.printf(
-  (info) =>
+  info =>
     `${info.timestamp} ${info.level} [${info.metadata.module ?? ""}:${info.metadata.method ?? ""}]: ${info.message} ${
       info.level.includes("error") || info.level.includes("warn")
         ? JSON.stringify(info.metadata, (_, value) => {
@@ -25,8 +25,22 @@ const logFormat = winston.format.printf(
 );
 
 // Filter function to prevent logging when zeroDataRetention is true
-const zeroDataRetentionFilter = winston.format((info) => {
-  if (info.metadata?.zeroDataRetention === true || info.zeroDataRetention === true) {
+const zeroDataRetentionFilter = winston.format(info => {
+  if (
+    info.metadata?.zeroDataRetention === true ||
+    info.zeroDataRetention === true
+  ) {
+    return false; // Don't log this message
+  }
+  return info;
+})();
+
+const reduceNoiseFilter = winston.format(info => {
+  if (
+    (info.metadata?.module === "nuq/metrics" ||
+      info.module === "nuq/metrics") &&
+    process.env.NUQ_REDUCE_NOISE === "true"
+  ) {
     return false; // Don't log this message
   }
   return info;
@@ -61,13 +75,14 @@ export const logger = winston.createLogger({
               ".log",
             format: winston.format.combine(
               zeroDataRetentionFilter,
-              winston.format.json()
+              winston.format.json(),
             ),
           }),
         ]
       : []),
     new winston.transports.Console({
       format: winston.format.combine(
+        reduceNoiseFilter,
         zeroDataRetentionFilter,
         winston.format.timestamp({ format: "YYYY-MM-DD HH:mm:ss" }),
         winston.format.metadata({

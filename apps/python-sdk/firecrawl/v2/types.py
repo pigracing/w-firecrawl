@@ -114,6 +114,16 @@ class DocumentMetadata(BaseModel):
     def coerce_status_code_to_int(cls, v):
         return cls._coerce_string_to_int(v)
 
+class AgentOptions(BaseModel):
+    """Configuration for the agent in extract operations."""
+    model: Literal["FIRE-1"] = "FIRE-1"
+
+class AttributeResult(BaseModel):
+    """Result of attribute extraction."""
+    selector: str
+    attribute: str
+    values: List[str]
+
 class Document(BaseModel):
     """A scraped document."""
     markdown: Optional[str] = None
@@ -123,6 +133,7 @@ class Document(BaseModel):
     summary: Optional[str] = None
     metadata: Optional[DocumentMetadata] = None
     links: Optional[List[str]] = None
+    images: Optional[List[str]] = None
     screenshot: Optional[str] = None
     actions: Optional[Dict[str, Any]] = None
     warning: Optional[str] = None
@@ -182,7 +193,7 @@ CategoryOption = Union[str, Category]
 
 FormatString = Literal[
     # camelCase versions (API format)
-    "markdown", "html", "rawHtml", "links", "screenshot", "summary", "changeTracking", "json",
+    "markdown", "html", "rawHtml", "links",  "images", "screenshot", "summary", "changeTracking", "json", "attributes",
     # snake_case versions (user-friendly)
     "raw_html", "change_tracking"
 ]
@@ -214,9 +225,18 @@ class ScreenshotFormat(BaseModel):
     full_page: Optional[bool] = None
     quality: Optional[int] = None
     viewport: Optional[Union[Dict[str, int], Viewport]] = None
+    
+class AttributeSelector(BaseModel):
+    """Selector and attribute pair for attribute extraction."""
+    selector: str
+    attribute: str
 
-FormatOption = Union[Dict[str, Any], FormatString, JsonFormat, ChangeTrackingFormat, ScreenshotFormat, Format]
+class AttributesFormat(Format):
+    """Configuration for attribute extraction."""
+    type: Literal["attributes"] = "attributes"
+    selectors: List[AttributeSelector]
 
+FormatOption = Union[Dict[str, Any], FormatString, JsonFormat, ChangeTrackingFormat, ScreenshotFormat, AttributesFormat, Format]
 # Scrape types
 class ScrapeFormats(BaseModel):
     """Output formats for scraping."""
@@ -226,6 +246,7 @@ class ScrapeFormats(BaseModel):
     raw_html: bool = False
     summary: bool = False
     links: bool = False
+    images: bool = False
     screenshot: bool = False
     change_tracking: bool = False
     json: bool = False
@@ -261,7 +282,7 @@ class ScrapeOptions(BaseModel):
     timeout: Optional[int] = None
     wait_for: Optional[int] = None
     mobile: Optional[bool] = None
-    parsers: Optional[List[str]] = None
+    parsers: Optional[Union[List[str], List[Union[str, 'PDFParser']]]] = None
     actions: Optional[List[Union['WaitAction', 'ScreenshotAction', 'ClickAction', 'WriteAction', 'PressAction', 'ScrollAction', 'ScrapeAction', 'ExecuteJavascriptAction', 'PDFAction']]] = None
     location: Optional['Location'] = None
     skip_tls_verification: Optional[bool] = None
@@ -272,6 +293,7 @@ class ScrapeOptions(BaseModel):
     proxy: Optional[Literal["basic", "stealth", "auto"]] = None
     max_age: Optional[int] = None
     store_in_cache: Optional[bool] = None
+    integration: Optional[str] = None
 
     @field_validator('formats')
     @classmethod
@@ -317,6 +339,7 @@ class CrawlRequest(BaseModel):
     webhook: Optional[Union[str, WebhookConfig]] = None
     scrape_options: Optional[ScrapeOptions] = None
     zero_data_retention: bool = False
+    integration: Optional[str] = None
 
 class CrawlResponse(BaseModel):
     """Information about a crawl job."""
@@ -332,6 +355,10 @@ class CrawlJob(BaseModel):
     expires_at: Optional[datetime] = None
     next: Optional[str] = None
     data: List[Document] = []
+
+class CrawlStatusRequest(BaseModel):
+    """Request to get crawl job status."""
+    job_id: str
 
 class SearchResultWeb(BaseModel):
     """A web search result with URL, title, and description."""
@@ -393,6 +420,7 @@ class CrawlParamsData(BaseModel):
     scrape_options: Optional[ScrapeOptions] = None
     zero_data_retention: bool = False
     warning: Optional[str] = None
+    integration: Optional[str] = None
 
 class CrawlParamsResponse(BaseResponse[CrawlParamsData]):
     """Response from crawl params endpoint."""
@@ -403,6 +431,12 @@ class BatchScrapeRequest(BaseModel):
     """Request for batch scraping multiple URLs (internal helper only)."""
     urls: List[str]
     options: Optional[ScrapeOptions] = None
+    webhook: Optional[Union[str, WebhookConfig]] = None
+    append_to_id: Optional[str] = None
+    ignore_invalid_urls: Optional[bool] = None
+    max_concurrency: Optional[int] = None
+    zero_data_retention: Optional[bool] = None
+    integration: Optional[str] = None
 
 class BatchScrapeResponse(BaseModel):
     """Response from starting a batch scrape job (mirrors CrawlResponse naming)."""
@@ -420,6 +454,14 @@ class BatchScrapeJob(BaseModel):
     next: Optional[str] = None
     data: List[Document] = []
 
+class BatchScrapeStatusRequest(BaseModel):
+    """Request to get batch scrape job status."""
+    job_id: str
+
+class BatchScrapeErrorsRequest(BaseModel):
+    """Request to get errors for a batch scrape job."""
+    job_id: str
+
 # Map types
 class MapOptions(BaseModel):
     """Options for mapping operations."""
@@ -428,11 +470,15 @@ class MapOptions(BaseModel):
     include_subdomains: Optional[bool] = None
     limit: Optional[int] = None
     timeout: Optional[int] = None
+    integration: Optional[str] = None
+    location: Optional['Location'] = None
 
 class MapRequest(BaseModel):
     """Request for mapping a website."""
     url: str
     options: Optional[MapOptions] = None
+
+
 
 class MapData(BaseModel):
     """Map results data."""
@@ -443,6 +489,20 @@ class MapResponse(BaseResponse[MapData]):
     pass
 
 # Extract types
+class ExtractRequest(BaseModel):
+    """Request for extract operations."""
+    urls: Optional[List[str]] = None
+    prompt: Optional[str] = None
+    schema_: Optional[Dict[str, Any]] = Field(default=None, alias="schema")
+    system_prompt: Optional[str] = None
+    allow_external_links: Optional[bool] = None
+    enable_web_search: Optional[bool] = None
+    show_sources: Optional[bool] = None
+    scrape_options: Optional[ScrapeOptions] = None
+    ignore_invalid_urls: Optional[bool] = None
+    integration: Optional[str] = None
+    agent: Optional[AgentOptions] = None
+    
 class ExtractResponse(BaseModel):
     """Response for extract operations (start/status/final)."""
     success: Optional[bool] = None
@@ -463,10 +523,48 @@ class ConcurrencyCheck(BaseModel):
 class CreditUsage(BaseModel):
     """Remaining credits for the team/API key."""
     remaining_credits: int
+    plan_credits: Optional[int] = None
+    billing_period_start: Optional[str] = None
+    billing_period_end: Optional[str] = None
 
 class TokenUsage(BaseModel):
     """Recent token usage metrics (if available)."""
     remaining_tokens: int
+    plan_tokens: Optional[int] = None
+    billing_period_start: Optional[str] = None
+    billing_period_end: Optional[str] = None
+
+class QueueStatusRequest(BaseModel):
+    """Request to retrieve queue status."""
+    pass
+
+class QueueStatusResponse(BaseModel):
+    """Metrics about the team's scrape queue."""
+    jobs_in_queue: int
+    active_jobs_in_queue: int
+    waiting_jobs_in_queue: int
+    max_concurrency: int
+    most_recent_success: Optional[datetime] = None
+
+class CreditUsageHistoricalPeriod(BaseModel):
+    startDate: Optional[str] = None
+    endDate: Optional[str] = None
+    apiKey: Optional[str] = None
+    creditsUsed: int
+
+class CreditUsageHistoricalResponse(BaseModel):
+    success: bool
+    periods: List[CreditUsageHistoricalPeriod]
+
+class TokenUsageHistoricalPeriod(BaseModel):
+    startDate: Optional[str] = None
+    endDate: Optional[str] = None
+    apiKey: Optional[str] = None
+    tokensUsed: int
+
+class TokenUsageHistoricalResponse(BaseModel):
+    success: bool
+    periods: List[TokenUsageHistoricalPeriod]
 
 # Action types
 class WaitAction(BaseModel):
@@ -519,6 +617,11 @@ class PDFAction(BaseModel):
     landscape: Optional[bool] = None
     scale: Optional[float] = None
 
+class PDFParser(BaseModel):
+    """PDF parser configuration with optional page limit."""
+    type: Literal["pdf"] = "pdf"
+    max_pages: Optional[int] = None
+
 # Location types
 class Location(BaseModel):
     """Location configuration for scraping."""
@@ -536,6 +639,7 @@ class SearchRequest(BaseModel):
     ignore_invalid_urls: Optional[bool] = None
     timeout: Optional[int] = 60000
     scrape_options: Optional[ScrapeOptions] = None
+    integration: Optional[str] = None
 
     @field_validator('sources')
     @classmethod
@@ -576,6 +680,8 @@ class SearchRequest(BaseModel):
                 raise ValueError(f"Invalid category format: {category}")
         
         return normalized_categories
+
+    # NOTE: parsers validation does not belong on SearchRequest; it is part of ScrapeOptions.
 
 class LinkResult(BaseModel):
     """A generic link result with optional metadata (used by search and map)."""
@@ -633,6 +739,10 @@ class CrawlErrorsResponse(BaseModel):
     errors: List[CrawlError]
     robots_blocked: List[str]
 
+class CrawlErrorsRequest(BaseModel):
+    """Request for crawl error monitoring."""
+    crawl_id: str
+
 class ActiveCrawl(BaseModel):
     """Information about an active crawl job."""
     id: str
@@ -645,6 +755,10 @@ class ActiveCrawlsResponse(BaseModel):
     success: bool = True
     crawls: List[ActiveCrawl]
 
+class ActiveCrawlsRequest(BaseModel):
+    """Request for listing active crawl jobs."""
+    pass
+
 # Configuration types
 class ClientConfig(BaseModel):
     """Configuration for the Firecrawl client."""
@@ -653,6 +767,13 @@ class ClientConfig(BaseModel):
     timeout: Optional[float] = None
     max_retries: int = 3
     backoff_factor: float = 0.5
+
+class PaginationConfig(BaseModel):
+    """Configuration for pagination behavior."""
+    auto_paginate: bool = True
+    max_pages: Optional[int] = Field(default=None, ge=0)
+    max_results: Optional[int] = Field(default=None, ge=0)
+    max_wait_time: Optional[int] = Field(default=None, ge=0)    # seconds
 
 # Response union types
 AnyResponse = Union[

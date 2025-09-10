@@ -59,3 +59,21 @@ class TestAsyncCrawlRequestPreparation:
         assert "metadata" not in webhook
         assert "events" not in webhook
 
+    def test_all_fields_including_integration(self):
+        req = CrawlRequest(
+            url="https://example.com",
+            include_paths=["/docs/*"],
+            exclude_paths=["/admin/*"],
+            max_discovery_depth=2,
+            sitemap="include",
+            ignore_query_parameters=True,
+            crawl_entire_domain=False,
+            allow_external_links=True,
+            allow_subdomains=True,
+            max_concurrency=3,
+            zero_data_retention=False,
+            integration="  _unit-test  ",
+        )
+        payload = _prepare_crawl_request(req)
+        assert payload["integration"] == "_unit-test"
+

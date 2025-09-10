@@ -31,6 +31,7 @@ from .types import (
     ExecuteJavascriptAction,
     PDFAction,
     Location,
+    PaginationConfig,
 )
 from .utils.http_client import HttpClient
 from .utils.http_client_async import AsyncHttpClient
@@ -94,8 +95,16 @@ class AsyncFirecrawlClient:
         timeout = kwargs.get("timeout")
         return await self.wait_crawl(resp.id, poll_interval=poll_interval, timeout=timeout)
 
-    async def get_crawl_status(self, job_id: str) -> CrawlJob:
-        return await async_crawl.get_crawl_status(self.async_http_client, job_id)
+    async def get_crawl_status(
+        self, 
+        job_id: str,
+        pagination_config: Optional[PaginationConfig] = None
+    ) -> CrawlJob:
+        return await async_crawl.get_crawl_status(
+            self.async_http_client, 
+            job_id,
+            pagination_config=pagination_config
+        )
 
     async def cancel_crawl(self, job_id: str) -> bool:
         return await async_crawl.cancel_crawl(self.async_http_client, job_id)
@@ -123,6 +132,7 @@ class AsyncFirecrawlClient:
         limit: Optional[int] = None,
         sitemap: Optional[Literal["only", "include", "skip"]] = None,
         timeout: Optional[int] = None,
+        integration: Optional[str] = None,
     ) -> MapData:
         options = MapOptions(
             search=search,
@@ -130,7 +140,8 @@ class AsyncFirecrawlClient:
             limit=limit,
             sitemap=sitemap if sitemap is not None else "include",
             timeout=timeout,
-        ) if any(v is not None for v in [search, include_subdomains, limit, sitemap, timeout]) else None
+            integration=integration,
+        ) if any(v is not None for v in [search, include_subdomains, limit, sitemap, integration, timeout]) else None
         return await async_map.map(self.async_http_client, url, options)
 
     async def start_batch_scrape(self, urls: List[str], **kwargs) -> Any:
@@ -154,8 +165,16 @@ class AsyncFirecrawlClient:
         timeout = kwargs.get("timeout")
         return await self.wait_batch_scrape(job_id, poll_interval=poll_interval, timeout=timeout)
 
-    async def get_batch_scrape_status(self, job_id: str):
-        return await async_batch.get_batch_scrape_status(self.async_http_client, job_id)
+    async def get_batch_scrape_status(
+        self, 
+        job_id: str,
+        pagination_config: Optional[PaginationConfig] = None
+    ):
+        return await async_batch.get_batch_scrape_status(
+            self.async_http_client, 
+            job_id,
+            pagination_config=pagination_config
+        )
 
     async def cancel_batch_scrape(self, job_id: str) -> bool:
         return await async_batch.cancel_batch_scrape(self.async_http_client, job_id)
@@ -179,6 +198,7 @@ class AsyncFirecrawlClient:
         ignore_invalid_urls: Optional[bool] = None,
         poll_interval: int = 2,
         timeout: Optional[int] = None,
+        integration: Optional[str] = None,
     ):
         return await async_extract.extract(
             self.async_http_client,
@@ -193,6 +213,7 @@ class AsyncFirecrawlClient:
             ignore_invalid_urls=ignore_invalid_urls,
             poll_interval=poll_interval,
             timeout=timeout,
+            integration=integration,
         )
 
     async def get_extract_status(self, job_id: str):
@@ -210,6 +231,7 @@ class AsyncFirecrawlClient:
         show_sources: Optional[bool] = None,
         scrape_options: Optional['ScrapeOptions'] = None,
         ignore_invalid_urls: Optional[bool] = None,
+        integration: Optional[str] = None,
     ):
         return await async_extract.start_extract(
             self.async_http_client,
@@ -222,6 +244,7 @@ class AsyncFirecrawlClient:
             show_sources=show_sources,
             scrape_options=scrape_options,
             ignore_invalid_urls=ignore_invalid_urls,
+            integration=integration,
         )
 
     # Usage endpoints
@@ -236,6 +259,18 @@ class AsyncFirecrawlClient:
     async def get_token_usage(self):
         from .methods.aio import usage as async_usage  # type: ignore[attr-defined]
         return await async_usage.get_token_usage(self.async_http_client)
+    
+    async def get_credit_usage_historical(self, by_api_key: bool = False):
+        from .methods.aio import usage as async_usage  # type: ignore[attr-defined]
+        return await async_usage.get_credit_usage_historical(self.async_http_client, by_api_key)
+    
+    async def get_token_usage_historical(self, by_api_key: bool = False):
+        from .methods.aio import usage as async_usage  # type: ignore[attr-defined]
+        return await async_usage.get_token_usage_historical(self.async_http_client, by_api_key)
+
+    async def get_queue_status(self):
+        from .methods.aio import usage as async_usage  # type: ignore[attr-defined]
+        return await async_usage.get_queue_status(self.async_http_client)
 
     # Watcher (sync object usable from async contexts)
     def watcher(

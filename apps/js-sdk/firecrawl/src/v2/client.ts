@@ -19,7 +19,7 @@ import {
   batchScrape as batchWaiter,
 } from "./methods/batch";
 import { startExtract, getExtractStatus, extract as extractWaiter } from "./methods/extract";
-import { getConcurrency, getCreditUsage, getTokenUsage } from "./methods/usage";
+import { getConcurrency, getCreditUsage, getQueueStatus, getTokenUsage, getCreditUsageHistorical, getTokenUsageHistorical } from "./methods/usage";
 import type {
   Document,
   ScrapeOptions,
@@ -36,6 +36,7 @@ import type {
   ExtractResponse,
   CrawlOptions,
   BatchScrapeOptions,
+  PaginationConfig,
 } from "./types";
 import { Watcher } from "./watcher";
 import type { WatcherOptions } from "./watcher";
@@ -145,8 +146,8 @@ export class FirecrawlClient {
    * Get the status and partial data of a crawl job.
    * @param jobId Crawl job id.
    */
-  async getCrawlStatus(jobId: string): Promise<CrawlJob> {
-    return getCrawlStatus(this.http, jobId);
+  async getCrawlStatus(jobId: string, pagination?: PaginationConfig): Promise<CrawlJob> {
+    return getCrawlStatus(this.http, jobId, pagination);
   }
   /**
    * Cancel a crawl job.
@@ -201,8 +202,8 @@ export class FirecrawlClient {
    * Get the status and partial data of a batch scrape job.
    * @param jobId Batch job id.
    */
-  async getBatchScrapeStatus(jobId: string): Promise<BatchScrapeJob> {
-    return getBatchScrapeStatus(this.http, jobId);
+  async getBatchScrapeStatus(jobId: string, pagination?: PaginationConfig): Promise<BatchScrapeJob> {
+    return getBatchScrapeStatus(this.http, jobId, pagination);
   }
   /**
    * Retrieve batch scrape errors and robots.txt blocks.
@@ -266,6 +267,21 @@ export class FirecrawlClient {
   /** Recent token usage. */
   async getTokenUsage() {
     return getTokenUsage(this.http);
+  }
+
+  /** Historical credit usage by month; set byApiKey to true to break down by API key. */
+  async getCreditUsageHistorical(byApiKey?: boolean) {
+    return getCreditUsageHistorical(this.http, byApiKey);
+  }
+
+  /** Historical token usage by month; set byApiKey to true to break down by API key. */
+  async getTokenUsageHistorical(byApiKey?: boolean) {
+    return getTokenUsageHistorical(this.http, byApiKey);
+  }
+
+  /** Metrics about the team's scrape queue. */
+  async getQueueStatus() {
+    return getQueueStatus(this.http);
   }
 
   // Watcher

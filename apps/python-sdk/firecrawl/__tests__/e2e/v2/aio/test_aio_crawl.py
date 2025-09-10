@@ -53,6 +53,7 @@ async def test_async_crawl_with_all_params():
         allow_subdomains=True,
         delay=1,
         max_concurrency=2,
+        integration="_e2e-test",
         webhook="https://example.com/hook",
         scrape_options=ScrapeOptions(
             formats=[

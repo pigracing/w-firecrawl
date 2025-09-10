@@ -17,6 +17,7 @@ def _prepare_extract_request(
     show_sources: Optional[bool] = None,
     scrape_options: Optional[ScrapeOptions] = None,
     ignore_invalid_urls: Optional[bool] = None,
+    integration: Optional[str] = None,
 ) -> Dict[str, Any]:
     body: Dict[str, Any] = {}
     if urls is not None:
@@ -39,6 +40,8 @@ def _prepare_extract_request(
         prepared = prepare_scrape_options(scrape_options)
         if prepared:
             body["scrapeOptions"] = prepared
+    if integration is not None and str(integration).strip():
+        body["integration"] = str(integration).strip()
     return body
 
 
@@ -54,6 +57,7 @@ async def start_extract(
     show_sources: Optional[bool] = None,
     scrape_options: Optional[ScrapeOptions] = None,
     ignore_invalid_urls: Optional[bool] = None,
+    integration: Optional[str] = None,
 ) -> ExtractResponse:
     body = _prepare_extract_request(
         urls,
@@ -65,6 +69,7 @@ async def start_extract(
         show_sources=show_sources,
         scrape_options=scrape_options,
         ignore_invalid_urls=ignore_invalid_urls,
+        integration=integration,
     )
     resp = await client.post("/v2/extract", body)
     return ExtractResponse(**resp.json())
@@ -106,6 +111,7 @@ async def extract(
     ignore_invalid_urls: Optional[bool] = None,
     poll_interval: int = 2,
     timeout: Optional[int] = None,
+    integration: Optional[str] = None,
 ) -> ExtractResponse:
     started = await start_extract(
         client,
@@ -118,6 +124,7 @@ async def extract(
         show_sources=show_sources,
         scrape_options=scrape_options,
         ignore_invalid_urls=ignore_invalid_urls,
+        integration=integration,
     )
     job_id = getattr(started, "id", None)
     if not job_id:

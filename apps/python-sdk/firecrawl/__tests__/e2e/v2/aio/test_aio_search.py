@@ -140,6 +140,7 @@ async def test_async_search_all_parameters():
         location="US",
         ignore_invalid_urls=True,
         timeout=60000,
+        integration="_e2e-test",
         scrape_options=ScrapeOptions(
             formats=[
                 "markdown",

@@ -89,4 +89,21 @@ class TestScrapeRequestPreparation:
     def test_whitespace_url_validation(self):
         """Test validation with whitespace-only URL."""
         with pytest.raises(ValueError, match="URL cannot be empty"):
-            _prepare_scrape_request("   ") 
+            _prepare_scrape_request("   ")
+
+    def test_all_params_including_integration(self):
+        opts = ScrapeOptions(
+            formats=["markdown"],
+            headers={"User-Agent": "Test"},
+            include_tags=["h1"],
+            exclude_tags=["nav"],
+            only_main_content=False,
+            timeout=15000,
+            wait_for=2000,
+            mobile=True,
+            skip_tls_verification=True,
+            remove_base64_images=False,
+            integration="  _unit-test  ",
+        )
+        data = _prepare_scrape_request("https://example.com", opts)
+        assert data["integration"] == "_unit-test"

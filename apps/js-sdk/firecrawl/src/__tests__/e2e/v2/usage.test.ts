@@ -32,5 +32,13 @@ describe("v2.usage e2e", () => {
     const resp = await client.getTokenUsage();
     expect(typeof resp.remainingTokens).toBe("number");
   }, 60_000);
+
+  test("get_queue_status", async () => {
+    const resp = await client.getQueueStatus();
+    expect(typeof resp.jobsInQueue).toBe("number");
+    expect(typeof resp.activeJobsInQueue).toBe("number");
+    expect(typeof resp.waitingJobsInQueue).toBe("number");
+    expect(typeof resp.maxConcurrency).toBe("number");
+  }, 60_000);
 });
 

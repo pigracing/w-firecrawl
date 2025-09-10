@@ -1,14 +1,17 @@
 import { parseStringPromise } from "xml2js";
-import { WebCrawler } from "./crawler";
+import { WebCrawler, SITEMAP_LIMIT } from "./crawler";
 import { scrapeURL } from "../scrapeURL";
 import { scrapeOptions } from "../../controllers/v2/types";
 import type { Logger } from "winston";
-import { CostTracking } from "../../lib/extract/extraction-service";
-import { parseSitemapXml, processSitemap } from "../../lib/crawler";
+import { CostTracking } from "../../lib/cost-tracking";
 import { ScrapeJobTimeoutError } from "../../lib/error";
+import type { ScrapeOptions } from "../../controllers/v2/types";
+import { Engine } from "../scrapeURL/engines";
+import { parseSitemapXml, processSitemap } from "@mendable/firecrawl-rs";
 const useFireEngine =
   process.env.FIRE_ENGINE_BETA_URL !== "" &&
   process.env.FIRE_ENGINE_BETA_URL !== undefined;
+
 export async function getLinksFromSitemap(
   {
     sitemapUrl,
@@ -16,12 +19,14 @@ export async function getLinksFromSitemap(
     mode = "axios",
     maxAge = 0,
     zeroDataRetention,
+    location,
   }: {
     sitemapUrl: string;
     urlsHandler(urls: string[]): unknown;
     mode?: "axios" | "fire-engine";
     maxAge?: number;
     zeroDataRetention: boolean;
+    location?: ScrapeOptions["location"];
   },
   logger: Logger,
   crawlId: string,
@@ -29,7 +34,7 @@ export async function getLinksFromSitemap(
   abort?: AbortSignal,
   mock?: string,
 ): Promise<number> {
-  if (sitemapsHit.size >= 20) {
+  if (sitemapsHit.size >= SITEMAP_LIMIT) {
     return 0;
   }
 
@@ -43,24 +48,49 @@ export async function getLinksFromSitemap(
   try {
     let content: string = "";
     try {
+      const shouldPrioritizeFireEngine =
+        location && mode === "fire-engine" && useFireEngine;
+
+      const forceEngine: Engine[] = [
+        ...(maxAge > 0 ? ["index" as const] : []),
+        ...(shouldPrioritizeFireEngine
+          ? [
+              "fire-engine;tlsclient" as const,
+              "fire-engine;tlsclient;stealth" as const,
+            ]
+          : []),
+        "fetch",
+        ...(!shouldPrioritizeFireEngine &&
+        mode === "fire-engine" &&
+        useFireEngine
+          ? [
+              "fire-engine;tlsclient" as const,
+              "fire-engine;tlsclient;stealth" as const,
+            ]
+          : []),
+      ];
+
       const response = await scrapeURL(
         "sitemap;" + crawlId,
         sitemapUrl,
-        scrapeOptions.parse({ formats: ["rawHtml"], useMock: mock, maxAge }),
+        scrapeOptions.parse({
+          formats: ["rawHtml"],
+          useMock: mock,
+          maxAge,
+          ...(location ? { location } : {}),
+        }),
         {
-          forceEngine: [
-            ...(maxAge > 0 ? ["index" as const] : []),
-            "fetch",
-            ...((mode === "fire-engine" && useFireEngine) ? ["fire-engine;tlsclient" as const] : []),
-          ],
+          forceEngine,
           v0DisableJsDom: true,
-          externalAbort: abort ? {
-            signal: abort,
-            tier: "external",
-            throwable() {
-              return new Error("Sitemap fetch aborted");
-            },
-          } : undefined,
+          externalAbort: abort
+            ? {
+                signal: abort,
+                tier: "external",
+                throwable() {
+                  return new Error("Sitemap fetch aborted");
+                },
+              }
+            : undefined,
           teamId: "sitemap",
           zeroDataRetention,
         },
@@ -74,17 +104,14 @@ export async function getLinksFromSitemap(
       ) {
         content = response.document.rawHtml!;
       } else {
-        logger.error(
-          `Request failed for sitemap fetch`,
-          {
-            method: "getLinksFromSitemap",
-            mode,
-            sitemapUrl,
-            error: response.success
-              ? response.document.metadata.statusCode
-              : response.error,
-          },
-        );
+        logger.error(`Request failed for sitemap fetch`, {
+          method: "getLinksFromSitemap",
+          mode,
+          sitemapUrl,
+          error: response.success
+            ? response.document.metadata.statusCode
+            : response.error,
+        });
         return 0;
       }
     } catch (error) {
@@ -97,7 +124,7 @@ export async function getLinksFromSitemap(
           sitemapUrl,
           error,
         });
-  
+
         return 0;
       }
     }
@@ -106,34 +133,47 @@ export async function getLinksFromSitemap(
     try {
       instructions = await processSitemap(content);
     } catch (error) {
-      logger.warn("Rust sitemap processing failed, falling back to JavaScript logic", {
-        method: "getLinksFromSitemap",
-        sitemapUrl,
-        error: error.message,
-      });
-      
+      logger.warn(
+        "Rust sitemap processing failed, falling back to JavaScript logic",
+        {
+          method: "getLinksFromSitemap",
+          sitemapUrl,
+          error: error.message,
+        },
+      );
+
       let parsed;
       try {
         parsed = await parseSitemapXml(content);
       } catch (parseError) {
-        logger.warn("Rust XML parsing failed, falling back to JavaScript logic", {
-          method: "getLinksFromSitemap",
-          sitemapUrl,
-          error: parseError.message,
-        });
+        logger.warn(
+          "Rust XML parsing failed, falling back to JavaScript logic",
+          {
+            method: "getLinksFromSitemap",
+            sitemapUrl,
+            error: parseError.message,
+          },
+        );
         parsed = await parseStringPromise(content);
       }
-      
+
       const root = parsed.urlset || parsed.sitemapindex;
       let count = 0;
 
       if (root && root.sitemap) {
         const sitemapUrls = root.sitemap
-          .filter((sitemap) => sitemap.loc && sitemap.loc.length > 0)
-          .map((sitemap) => sitemap.loc[0].trim());
+          .filter(sitemap => sitemap.loc && sitemap.loc.length > 0)
+          .map(sitemap => sitemap.loc[0].trim());
 
-        const sitemapPromises: Promise<number>[] = sitemapUrls.map((sitemapUrl) =>
-          getLinksFromSitemap({ sitemapUrl, urlsHandler, mode, zeroDataRetention }, logger, crawlId, sitemapsHit, abort, mock),
+        const sitemapPromises: Promise<number>[] = sitemapUrls.map(sitemapUrl =>
+          getLinksFromSitemap(
+            { sitemapUrl, urlsHandler, mode, zeroDataRetention, location },
+            logger,
+            crawlId,
+            sitemapsHit,
+            abort,
+            mock,
+          ),
         );
 
         const results = await Promise.all(sitemapPromises);
@@ -141,17 +181,23 @@ export async function getLinksFromSitemap(
       } else if (root && root.url) {
         const xmlSitemaps: string[] = root.url
           .filter(
-            (url) =>
+            url =>
               url.loc &&
               url.loc.length > 0 &&
               url.loc[0].trim().toLowerCase().endsWith(".xml"),
           )
-          .map((url) => url.loc[0].trim());
+          .map(url => url.loc[0].trim());
 
         if (xmlSitemaps.length > 0) {
-          const sitemapPromises = xmlSitemaps.map((sitemapUrl) =>
+          const sitemapPromises = xmlSitemaps.map(sitemapUrl =>
             getLinksFromSitemap(
-              { sitemapUrl: sitemapUrl, urlsHandler, mode, zeroDataRetention },
+              {
+                sitemapUrl: sitemapUrl,
+                urlsHandler,
+                mode,
+                zeroDataRetention,
+                location,
+              },
               logger,
               crawlId,
               sitemapsHit,
@@ -167,13 +213,13 @@ export async function getLinksFromSitemap(
 
         const validUrls = root.url
           .filter(
-            (url) =>
+            url =>
               url.loc &&
               url.loc.length > 0 &&
               !url.loc[0].trim().toLowerCase().endsWith(".xml") &&
               !WebCrawler.prototype.isFile(url.loc[0].trim()),
           )
-          .map((url) => url.loc[0].trim());
+          .map(url => url.loc[0].trim());
         count += validUrls.length;
 
         const h = urlsHandler(validUrls);
@@ -181,15 +227,23 @@ export async function getLinksFromSitemap(
           await h;
         }
       }
-      
+
       return count;
     }
-    
+
     let count = 0;
     for (const instruction of instructions.instructions) {
       if (instruction.action === "recurse") {
-        const sitemapPromises: Promise<number>[] = instruction.urls.map((sitemapUrl) =>
-          getLinksFromSitemap({ sitemapUrl, urlsHandler, mode, zeroDataRetention }, logger, crawlId, sitemapsHit, abort, mock),
+        const sitemapPromises: Promise<number>[] = instruction.urls.map(
+          sitemapUrl =>
+            getLinksFromSitemap(
+              { sitemapUrl, urlsHandler, mode, zeroDataRetention, location },
+              logger,
+              crawlId,
+              sitemapsHit,
+              abort,
+              mock,
+            ),
         );
         const results = await Promise.all(sitemapPromises);
         count += results.reduce((a, x) => a + x);

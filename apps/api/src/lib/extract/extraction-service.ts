@@ -14,20 +14,23 @@ import {
 } from "../../scraper/scrapeURL/transformers/llmExtract";
 import { billTeam } from "../../services/billing/credit_billing";
 import { logJob } from "../../services/logging/log_job";
-import { _addScrapeJobToBullMQ } from "../../services/queue-jobs";
 import { dereferenceSchema } from "./helpers/dereference-schema";
 import { spreadSchemas } from "./helpers/spread-schemas";
 import { transformArrayToObject } from "./helpers/transform-array-to-obj";
 import { mixSchemaObjects } from "./helpers/mix-schema-objs";
 import Ajv from "ajv";
 const ajv = new Ajv();
+import { getErrorContactMessage } from "../deployment";
 
 import { ExtractStep, updateExtract } from "./extract-redis";
 import { deduplicateObjectsArray } from "./helpers/deduplicate-objs-array";
 import { mergeNullValObjs } from "./helpers/merge-null-val-objs";
-import { areMergeable } from "./helpers/merge-null-val-objs";
 import { CUSTOM_U_TEAMS } from "./config";
-import { calculateFinalResultCost, calculateThinkingCost, estimateTotalCost } from "./usage/llm-cost";
+import {
+  calculateFinalResultCost,
+  calculateThinkingCost,
+  estimateTotalCost,
+} from "./usage/llm-cost";
 import { analyzeSchemaAndPrompt } from "./completions/analyzeSchemaAndPrompt";
 import { batchExtractPromise } from "./completions/batchExtract";
 import { singleAnswerCompletion } from "./completions/singleAnswer";
@@ -37,8 +40,8 @@ import { normalizeUrl } from "../canonical-url";
 import { search } from "../../search";
 import { buildRephraseToSerpPrompt } from "./build-prompts";
 import { getACUCTeam } from "../../controllers/auth";
-import { isUrlBlocked } from "../../scraper/WebScraper/utils/blocklist";
 import { langfuse } from "../../services/langfuse";
+import { CostLimitExceededError, CostTracking } from "../cost-tracking";
 
 interface ExtractServiceOptions {
   request: ExtractRequest;
@@ -47,6 +50,7 @@ interface ExtractServiceOptions {
   cacheMode?: "load" | "save" | "direct";
   cacheKey?: string;
   agent?: boolean;
+  apiKeyId: number | null;
 }
 
 export interface ExtractResult {
@@ -70,63 +74,11 @@ type completions = {
   sources?: string[];
 };
 
-export class CostLimitExceededError extends Error {
-  constructor() {
-    super("Cost limit exceeded");
-    this.message = "Cost limit exceeded";
-    this.name = "CostLimitExceededError";
-  }
-}
-
-const nanProof = (n: number | null | undefined) => isNaN(n ?? 0) ? 0 : (n ?? 0);
-
-export class CostTracking {
-  calls: {
-    type: "smartScrape" | "other",
-    metadata: Record<string, any>,
-    cost: number,
-    model: string,
-    tokens?: {
-      input: number,
-      output: number,
-    },
-    stack: string,
-  }[] = [];
-  limit: number | null = null;
-
-  constructor(limit: number | null = null) {
-    this.limit = limit;
-  }
-
-  public addCall(call: Omit<typeof this.calls[number], "stack">) {
-    this.calls.push({
-      ...call,
-      stack: new Error().stack!.split("\n").slice(2).join("\n"),
-    });
-
-    if (this.limit !== null && this.toJSON().totalCost > this.limit) {
-      throw new CostLimitExceededError();
-    }
-  }
-
-  public toJSON() {
-    return {
-      calls: this.calls,
-
-      smartScrapeCallCount: this.calls.filter(c => c.type === "smartScrape").length,
-      smartScrapeCost: this.calls.filter(c => c.type === "smartScrape").reduce((acc, c) => acc + nanProof(c.cost), 0),
-      otherCallCount: this.calls.filter(c => c.type === "other").length,
-      otherCost: this.calls.filter(c => c.type === "other").reduce((acc, c) => acc + nanProof(c.cost), 0),
-      totalCost: this.calls.reduce((acc, c) => acc + nanProof(c.cost), 0),
-    }
-  }
-}
-
 export async function performExtraction(
   extractId: string,
   options: ExtractServiceOptions,
 ): Promise<ExtractResult> {
-  const { request, teamId, subId } = options;
+  const { request, teamId, subId, apiKeyId } = options;
   const urlTraces: URLTrace[] = [];
   let docsMap: Map<string, Document> = new Map();
   let singleAnswerCompletions: completions | null = null;
@@ -162,7 +114,6 @@ export async function performExtraction(
   });
 
   try {
-
     // If no URLs are provided, generate URLs from the prompt
     if ((!request.urls || request.urls.length === 0) && request.prompt) {
       logger.debug("Generating URLs from prompt...", {
@@ -180,7 +131,7 @@ export async function performExtraction(
         num_results: 10,
       });
 
-      request.urls = searchResults.map((result) => result.url) as string[];
+      request.urls = searchResults.map(result => result.url) as string[];
     }
     if (request.urls && request.urls.length === 0) {
       logger.error("No search results found", {
@@ -208,7 +159,14 @@ export async function performExtraction(
         zeroDataRetention: false, // not supported
       });
 
-      await billTeam(teamId, subId, tokens_billed, logger, true).catch((error) => {
+      await billTeam(
+        teamId,
+        subId,
+        tokens_billed,
+        apiKeyId,
+        logger,
+        true,
+      ).catch(error => {
         logger.error(
           `Failed to bill team ${teamId} for thinking tokens: ${error}`,
         );
@@ -230,7 +188,10 @@ export async function performExtraction(
     ) {
       logger.debug("Loading cached docs...");
       try {
-        const cache = await getCachedDocs(urls, request.__experimental_cacheKey);
+        const cache = await getCachedDocs(
+          urls,
+          request.__experimental_cacheKey,
+        );
         for (const doc of cache) {
           if (doc.metadata.url) {
             docsMap.set(normalizeUrl(doc.metadata.url), doc);
@@ -258,13 +219,17 @@ export async function performExtraction(
 
     let reqSchema = request.schema;
     if (!reqSchema && request.prompt) {
-      const schemaGenRes = await generateSchemaFromPrompt(request.prompt, logger, costTracking, {
-        teamId,
-        functionId: "performExtraction/generateRequestSchema",
-        extractId,
-      });
+      const schemaGenRes = await generateSchemaFromPrompt(
+        request.prompt,
+        logger,
+        costTracking,
+        {
+          teamId,
+          functionId: "performExtraction/generateRequestSchema",
+          extractId,
+        },
+      );
       reqSchema = schemaGenRes.extract;
-
 
       logger.debug("Generated request schema.", {
         originalSchema: request.schema,
@@ -295,11 +260,18 @@ export async function performExtraction(
       reasoning,
       keyIndicators,
       tokenUsage: schemaAnalysisTokenUsage,
-    } = await analyzeSchemaAndPrompt(urls, reqSchema, request.prompt ?? "", logger, costTracking, {
-      teamId,
-      functionId: "performExtraction",
-      extractId,
-    });
+    } = await analyzeSchemaAndPrompt(
+      urls,
+      reqSchema,
+      request.prompt ?? "",
+      logger,
+      costTracking,
+      {
+        teamId,
+        functionId: "performExtraction",
+        extractId,
+      },
+    );
 
     logger.debug("Analyzed schema.", {
       isMultiEntity,
@@ -316,7 +288,7 @@ export async function performExtraction(
       urlCount: request.urls?.length || 0,
     });
 
-    const urlPromises = urls.map((url) =>
+    const urlPromises = urls.map(url =>
       processUrl(
         {
           url,
@@ -355,16 +327,19 @@ export async function performExtraction(
     );
 
     const processedUrls = await Promise.all(urlPromises);
-    let links = processedUrls.flat().filter((url) => url);
+    let links = processedUrls.flat().filter(url => url);
     logger.debug("Processed URLs.", {
       linkCount: links.length,
     });
 
     if (links.length === 0) {
       links = urls.map(x => x.replace(/\*$/g, ""));
-      logger.warn("0 links! Doing just the original URLs. (without * wildcard)", {
-        linkCount: links.length,
-      });
+      logger.warn(
+        "0 links! Doing just the original URLs. (without * wildcard)",
+        {
+          linkCount: links.length,
+        },
+      );
     }
 
     log["links"] = links;
@@ -391,7 +366,10 @@ export async function performExtraction(
         multiEntityKeys,
       );
       rSchema = singleAnswerSchema;
-      logger.debug("Spread schemas.", { singleAnswerSchema, multiEntitySchema });
+      logger.debug("Spread schemas.", {
+        singleAnswerSchema,
+        multiEntitySchema,
+      });
 
       await updateExtract(extractId, {
         status: "processing",
@@ -423,7 +401,7 @@ export async function performExtraction(
       let startScrape = Date.now();
       log["docsSizeBeforeMultiEntityScrape"] = docsMap.size;
 
-      const scrapePromises = links.map((url) => {
+      const scrapePromises = links.map(url => {
         if (!docsMap.has(normalizeUrl(url))) {
           return scrapeDocument(
             {
@@ -432,6 +410,7 @@ export async function performExtraction(
               origin: "extract",
               timeout,
               flags: acuc?.flags ?? null,
+              apiKeyId,
             },
             urlTraces,
             logger.child({
@@ -497,48 +476,51 @@ export async function performExtraction(
         chunks.push(multyEntityDocs.slice(i, i + chunkSize));
       }
 
-      const sessionIds = chunks.map(() => 'fc-' + crypto.randomUUID());
+      const sessionIds = chunks.map(() => "fc-" + crypto.randomUUID());
       await updateExtract(extractId, {
         status: "processing",
         steps: [
           {
             step: ExtractStep.MULTI_ENTITY_AGENT_SCRAPE,
             startedAt: Date.now(),
-            finishedAt: null
+            finishedAt: null,
           },
         ],
-        sessionIds
+        sessionIds,
       });
 
       // Process chunks sequentially with timeout
       for (let i = 0; i < chunks.length; i++) {
         const chunk = chunks[i];
         const sessionId = sessionIds[i];
-        const chunkPromises = chunk.map(async (doc) => {
+        const chunkPromises = chunk.map(async doc => {
           try {
             ajv.compile(multiEntitySchema);
 
             // Wrap in timeout promise
-            const timeoutPromise = new Promise((resolve) => {
+            const timeoutPromise = new Promise(resolve => {
               setTimeout(() => resolve(null), timeoutCompletion);
             });
 
-            const completionPromise = batchExtractPromise({
-              multiEntitySchema,
-              links,
-              prompt: request.prompt ?? "",
-              systemPrompt: request.systemPrompt ?? "",
-              doc,
-              useAgent: isAgentExtractModelValid(request.agent?.model),
-              extractId,
-              sessionId,
-              costTracking,
-              metadata: {
-                teamId,
-                functionId: "performExtraction/multiEntity",
+            const completionPromise = batchExtractPromise(
+              {
+                multiEntitySchema,
+                links,
+                prompt: request.prompt ?? "",
+                systemPrompt: request.systemPrompt ?? "",
+                doc,
+                useAgent: isAgentExtractModelValid(request.agent?.model),
                 extractId,
+                sessionId,
+                costTracking,
+                metadata: {
+                  teamId,
+                  functionId: "performExtraction/multiEntity",
+                  extractId,
+                },
               },
-            }, logger);
+              logger,
+            );
 
             // Race between timeout and completion
             const multiEntityCompletion = (await completionPromise) as Awaited<
@@ -611,12 +593,12 @@ export async function performExtraction(
         );
         extractionResults.push(...validResults);
         // Merge all extracts from valid results into a single array
-        const extractArrays = validResults.map((r) =>
+        const extractArrays = validResults.map(r =>
           Array.isArray(r.extract) ? r.extract : [r.extract],
         );
         const mergedExtracts = extractArrays.flat();
         multiEntityCompletions.push(...mergedExtracts);
-        multiEntityCompletions = multiEntityCompletions.filter((c) => c !== null);
+        multiEntityCompletions = multiEntityCompletions.filter(c => c !== null);
         logger.debug("All multi-entity completion chunks finished.", {
           completionCount: multiEntityCompletions.length,
         });
@@ -691,19 +673,22 @@ export async function performExtraction(
           throw error;
         }
       } catch (error) {
-        logger.error(`Failed to transform array to object`, { 
+        logger.error(`Failed to transform array to object`, {
           error,
           errorMessage: error.message,
           errorStack: error.stack,
           multiEntityResult: JSON.stringify(multiEntityResult),
           multiEntityCompletions: JSON.stringify(multiEntityCompletions),
-          multiEntitySchema: JSON.stringify(multiEntitySchema)
+          multiEntitySchema: JSON.stringify(multiEntitySchema),
         });
         const tokens_billed = 300 + calculateThinkingCost(costTracking);
         logJob({
           job_id: extractId,
           success: false,
-          message: (error instanceof Error ? error.message : "Failed to transform array to object"),
+          message:
+            error instanceof Error
+              ? error.message
+              : "Failed to transform array to object",
           num_docs: 1,
           docs: [],
           time_taken: (new Date().getTime() - Date.now()) / 1000,
@@ -719,15 +704,21 @@ export async function performExtraction(
           cost_tracking: costTracking,
           zeroDataRetention: false, // not supported
         });
-        await billTeam(teamId, subId, tokens_billed, logger, true).catch((error) => {
+        await billTeam(
+          teamId,
+          subId,
+          tokens_billed,
+          apiKeyId,
+          logger,
+          true,
+        ).catch(error => {
           logger.error(
             `Failed to bill team ${teamId} for thinking tokens: ${error}`,
           );
         });
         return {
           success: false,
-          error:
-            "An unexpected error occurred. Please contact help@firecrawl.com for help.",
+          error: getErrorContactMessage(),
           extractId,
           urlTrace: urlTraces,
           totalUrlsScraped,
@@ -764,7 +755,7 @@ export async function performExtraction(
         ],
       });
       log["docsSizeBeforeSingleEntityScrape"] = docsMap.size;
-      const scrapePromises = links.map((url) => {
+      const scrapePromises = links.map(url => {
         if (!docsMap.has(normalizeUrl(url))) {
           return scrapeDocument(
             {
@@ -773,6 +764,7 @@ export async function performExtraction(
               origin: "extract",
               timeout,
               flags: acuc?.flags ?? null,
+              apiKeyId,
             },
             urlTraces,
             logger.child({
@@ -829,7 +821,14 @@ export async function performExtraction(
           cost_tracking: costTracking,
           zeroDataRetention: false, // not supported
         });
-        await billTeam(teamId, subId, tokens_billed, logger, true).catch((error) => {
+        await billTeam(
+          teamId,
+          subId,
+          tokens_billed,
+          apiKeyId,
+          logger,
+          true,
+        ).catch(error => {
           logger.error(
             `Failed to bill team ${teamId} for thinking tokens: ${error}`,
           );
@@ -845,9 +844,17 @@ export async function performExtraction(
 
       if (docsMap.size == 0) {
         // All urls are invalid
-        logger.error("All provided URLs are invalid!");
+        const errorMessage = "All provided URLs are either invalid, unsupported or failed to be scraped.";
+        logger.error(errorMessage);
         const tokens_billed = 300 + calculateThinkingCost(costTracking);
-        await billTeam(teamId, subId, tokens_billed, logger, true).catch((error) => {
+        await billTeam(
+          teamId,
+          subId,
+          tokens_billed,
+          apiKeyId,
+          logger,
+          true,
+        ).catch(error => {
           logger.error(
             `Failed to bill team ${teamId} for thinking tokens: ${error}`,
           );
@@ -855,7 +862,7 @@ export async function performExtraction(
         logJob({
           job_id: extractId,
           success: false,
-          message: "All provided URLs are invalid. Please check your input and try again.",
+          message: errorMessage,
           num_docs: 1,
           docs: [],
           time_taken: (new Date().getTime() - Date.now()) / 1000,
@@ -873,15 +880,14 @@ export async function performExtraction(
         });
         return {
           success: false,
-          error:
-            "All provided URLs are invalid. Please check your input and try again.",
+          error: errorMessage,
           extractId,
           urlTrace: request.urlTrace ? urlTraces : undefined,
           totalUrlsScraped: 0,
         };
       }
 
-      let thisSessionId = 'fc-' + crypto.randomUUID();
+      let thisSessionId = "fc-" + crypto.randomUUID();
 
       await updateExtract(extractId, {
         status: "processing",
@@ -930,12 +936,12 @@ export async function performExtraction(
 
         // Add sources for top-level properties in single answer
         if (rSchema?.properties) {
-          Object.keys(rSchema.properties).forEach((key) => {
+          Object.keys(rSchema.properties).forEach(key => {
             if (completionResult[key] !== undefined) {
               sources[key] =
                 singleAnswerSources ||
                 singleAnswerDocs.map(
-                  (doc) => doc.metadata.url || doc.metadata.sourceURL || "",
+                  doc => doc.metadata.url || doc.metadata.sourceURL || "",
                 );
             }
           });
@@ -970,11 +976,11 @@ export async function performExtraction(
 
     let finalResult = reqSchema
       ? await mixSchemaObjects(
-          reqSchema,
-          singleAnswerResult,
-          multiEntityResult,
-          logger.child({ method: "mixSchemaObjects" }),
-        )
+        reqSchema,
+        singleAnswerResult,
+        multiEntityResult,
+        logger.child({ method: "mixSchemaObjects" }),
+      )
       : singleAnswerResult || multiEntityResult;
 
     // Tokenize final result to get token count
@@ -1029,18 +1035,22 @@ export async function performExtraction(
 
     const totalTokensUsed = tokenUsage.reduce((a, b) => a + b.totalTokens, 0);
     const llmUsage = estimateTotalCost(tokenUsage);
-    let tokensToBill = calculateFinalResultCost(finalResult) + calculateThinkingCost(costTracking);
+    let tokensToBill =
+      calculateFinalResultCost(finalResult) +
+      calculateThinkingCost(costTracking);
 
     if (CUSTOM_U_TEAMS.includes(teamId)) {
       tokensToBill = 1;
     }
 
     // Bill team for usage
-    await billTeam(teamId, subId, tokensToBill, logger, true).catch((error) => {
-      logger.error(
-        `Failed to bill team ${teamId} for ${tokensToBill} tokens: ${error}`,
-      );
-    });
+    await billTeam(teamId, subId, tokensToBill, apiKeyId, logger, true).catch(
+      error => {
+        logger.error(
+          `Failed to bill team ${teamId} for ${tokensToBill} tokens: ${error}`,
+        );
+      },
+    );
 
     // Log job with token usage and sources
     logJob({
@@ -1068,7 +1078,7 @@ export async function performExtraction(
         sources,
         tokensBilled: tokensToBill,
         // costTracking,
-      }).catch((error) => {
+      }).catch(error => {
         logger.error(
           `Failed to update extract ${extractId} status to completed: ${error}`,
         );
@@ -1109,15 +1119,22 @@ export async function performExtraction(
     };
   } catch (error) {
     const tokens_billed = 300 + calculateThinkingCost(costTracking);
-    await billTeam(teamId, subId, tokens_billed, logger, true).catch((error) => {
-      logger.error(
-        `Failed to bill team ${teamId} for thinking tokens: ${error}`,
-      );
-    });
+    await billTeam(teamId, subId, tokens_billed, apiKeyId, logger, true).catch(
+      error => {
+        logger.error(
+          `Failed to bill team ${teamId} for thinking tokens: ${error}`,
+        );
+      },
+    );
     await logJob({
       job_id: extractId,
       success: false,
-      message: (error instanceof Error ? error.message : typeof error === "string" ? error : "An unexpected error occurred"),
+      message:
+        error instanceof Error
+          ? error.message
+          : typeof error === "string"
+            ? error
+            : "An unexpected error occurred",
       num_docs: 1,
       docs: [],
       time_taken: (new Date().getTime() - Date.now()) / 1000,
@@ -1133,7 +1150,7 @@ export async function performExtraction(
       cost_tracking: costTracking,
       zeroDataRetention: false, // not supported
     });
-    
+
     throw error;
   }
 }

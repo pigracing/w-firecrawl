@@ -10,6 +10,7 @@ from ...types import (
 )
 from ...utils.http_client_async import AsyncHttpClient
 from ...utils.error_handler import handle_response_error
+from ...utils.normalize import normalize_document_input
 from ...utils.validation import validate_scrape_options, prepare_scrape_options
 
 T = TypeVar("T")
@@ -73,7 +74,7 @@ def _transform_array(arr: List[Any], result_type: Type[T]) -> List[Union[T, Docu
                 "summary" in item or
                 "json" in item
             ):
-                results.append(Document(**item))
+                results.append(Document(**normalize_document_input(item)))
             else:
                 results.append(result_type(**item))
         else:
@@ -168,5 +169,8 @@ def _prepare_search_request(request: SearchRequest) -> Dict[str, Any]:
         if scrape_data:
             data["scrapeOptions"] = scrape_data
         data.pop("scrape_options", None)
+    
+    if (v := getattr(validated_request, "integration", None)) is not None and str(v).strip():
+        data["integration"] = str(validated_request.integration).strip()
 
     return data

@@ -32,6 +32,7 @@ async def test_async_extract_with_schema_and_options():
         allow_external_links=False,
         enable_web_search=False,
         show_sources=False,
+        integration="_e2e-test",
         # agent={"model": "FIRE-1", "prompt": "Extract title"}, # Skipping agent test in CI
     )
     assert res is not None

@@ -1,37 +1,19 @@
 import { z } from "zod";
 import {
-  AuthCreditUsageChunk,
   BaseScrapeOptions,
   ScrapeOptions,
   Document as V2Document,
-  webhookSchema,
   TeamFlags,
 } from "./controllers/v2/types";
+import { AuthCreditUsageChunk } from "./controllers/v1/types";
 import { ExtractorOptions, Document } from "./lib/entities";
 import { InternalOptions } from "./scraper/scrapeURL";
-import type { CostTracking } from "./lib/extract/extraction-service";
+import type { CostTracking } from "./lib/cost-tracking";
+import { webhookSchema } from "./services/webhook/schema";
 
 type Mode = "crawl" | "single_urls" | "sitemap" | "kickoff";
 
 export { Mode };
-
-export interface CrawlResult {
-  source: string;
-  content: string;
-  options?: {
-    summarize?: boolean;
-    summarize_max_chars?: number;
-  };
-  metadata?: any;
-  raw_context_id?: number | string;
-  permissions?: any[];
-}
-
-export interface IngestResult {
-  success: boolean;
-  error: string;
-  data: CrawlResult[];
-}
 
 export interface WebScraperOptions {
   url: string;
@@ -60,6 +42,7 @@ export interface WebScraperOptions {
   sentry?: any;
   is_extract?: boolean;
   concurrencyLimited?: boolean;
+  apiKeyId: number | null;
 }
 
 export interface RunWebScraperParams {
@@ -75,16 +58,6 @@ export interface RunWebScraperParams {
   urlInvisibleInCurrentCrawl?: boolean;
   costTracking: CostTracking;
 }
-
-export type RunWebScraperResult =
-  | {
-      success: false;
-      error: Error;
-    }
-  | {
-      success: true;
-      document: V2Document;
-    };
 
 export interface FirecrawlJob {
   job_id?: string;
@@ -141,15 +114,6 @@ export interface FirecrawlCrawlStatusResponse {
   error?: string;
 }
 
-export interface FirecrawlExtractResponse {
-  statusCode: number;
-  body: {
-    success: boolean;
-    data: any[];
-  };
-  error?: string;
-}
-
 export enum RateLimiterMode {
   Crawl = "crawl",
   CrawlStatus = "crawlStatus",
@@ -185,27 +149,3 @@ export enum NotificationType {
   CONCURRENCY_LIMIT_REACHED = "concurrencyLimitReached",
   AUTO_RECHARGE_FREQUENT = "autoRechargeFrequent",
 }
-
-export type ScrapeLog = {
-  url: string;
-  scraper: string;
-  success?: boolean;
-  response_code?: number;
-  time_taken_seconds?: number;
-  proxy?: string;
-  retried?: boolean;
-  error_message?: string;
-  date_added?: string; // ISO 8601 format
-  html?: string;
-  ipv4_support?: boolean | null;
-  ipv6_support?: boolean | null;
-};
-
-export type WebhookEventType =
-  | "crawl.page"
-  | "batch_scrape.page"
-  | "crawl.started"
-  | "batch_scrape.started"
-  | "crawl.completed"
-  | "batch_scrape.completed"
-  | "crawl.failed";

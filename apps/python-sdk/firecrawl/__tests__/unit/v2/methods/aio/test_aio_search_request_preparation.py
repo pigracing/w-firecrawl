@@ -33,10 +33,12 @@ class TestAsyncSearchRequestPreparation:
             ignore_invalid_urls=False,
             timeout=30000,
             scrape_options=scrape_opts,
+            integration="  _unit-test  ",
         )
         data = _prepare_search_request(request)
         assert data["ignoreInvalidURLs"] is False
         assert "scrapeOptions" in data
+        assert data["integration"] == "_unit-test"
 
     def test_exclude_none_behavior(self):
         request = SearchRequest(
@@ -60,4 +62,3 @@ class TestAsyncSearchRequestPreparation:
         scrape_data = data["scrapeOptions"]
         assert "onlyMainContent" in scrape_data
         assert "mobile" in scrape_data
-

@@ -23,7 +23,7 @@ export function estimateTotalCost_F0(tokenUsage: TokenUsage[]): number {
   }, 0);
 }
 
-export function estimateCost_F0(tokenUsage: TokenUsage): number {
+function estimateCost_F0(tokenUsage: TokenUsage): number {
   let totalCost = 0;
   try {
     let model = tokenUsage.model ?? (process.env.MODEL_NAME || "gpt-4o-mini");

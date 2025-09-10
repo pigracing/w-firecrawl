@@ -1,38 +1,34 @@
 import koffi from "koffi";
-import { join } from "path";
 import "../services/sentry";
 import * as Sentry from "@sentry/node";
 
 import dotenv from "dotenv";
 import { logger } from "./logger";
 import { stat } from "fs/promises";
+import { HTML_TO_MARKDOWN_PATH } from "../natives";
 dotenv.config();
 
 // TODO: add a timeout to the Go parser
-const goExecutablePath = join(
-  process.cwd(),
-  "sharedLibs",
-  "go-html-to-md",
-  "html-to-markdown.so",
-);
 
 class GoMarkdownConverter {
   private static instance: GoMarkdownConverter;
   private convert: any;
   private free: any;
-  
+
   private constructor() {
-    const lib = koffi.load(goExecutablePath);
+    const lib = koffi.load(HTML_TO_MARKDOWN_PATH);
     this.free = lib.func("FreeCString", "void", ["string"]);
     const cstn = "CString:" + crypto.randomUUID();
     const freedResultString = koffi.disposable(cstn, "string", this.free);
-    this.convert = lib.func("ConvertHTMLToMarkdown", freedResultString, ["string"]);
+    this.convert = lib.func("ConvertHTMLToMarkdown", freedResultString, [
+      "string",
+    ]);
   }
 
   public static async getInstance(): Promise<GoMarkdownConverter> {
     if (!GoMarkdownConverter.instance) {
       try {
-        await stat(goExecutablePath);
+        await stat(HTML_TO_MARKDOWN_PATH);
       } catch (_) {
         throw Error("Go shared library not found");
       }
@@ -83,7 +79,7 @@ export async function parseMarkdown(
     } else {
       logger.warn(
         "Tried to use Go parser, but it doesn't exist in the file system.",
-        { goExecutablePath },
+        { HTML_TO_MARKDOWN_PATH },
       );
     }
   }
