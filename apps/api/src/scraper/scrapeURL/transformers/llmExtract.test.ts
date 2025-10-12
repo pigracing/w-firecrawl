@@ -1,5 +1,6 @@
 import { removeDefaultProperty } from "./llmExtract";
 import { trimToTokenLimit } from "./llmExtract";
+import { performSummary } from "./llmExtract";
 import { encoding_for_model } from "@dqbd/tiktoken";
 
 jest.mock("@dqbd/tiktoken", () => ({
@@ -266,5 +267,57 @@ describe("trimToTokenLimit", () => {
     expect(result.numTokens).toBe(10);
     expect(result.warning).toBeUndefined();
     expect(mockFree).toHaveBeenCalled();
+  });
+});
+
+describe("performSummary", () => {
+  it("should skip summary generation and add warning when markdown is empty", async () => {
+    const mockMeta = {
+      options: { formats: [{ type: "summary" }] },
+      internalOptions: { zeroDataRetention: false, teamId: "test-team" },
+      logger: {
+        child: jest.fn(() => ({
+          info: jest.fn(),
+        })),
+      },
+      costTracking: {},
+      id: "test-id",
+    } as any;
+
+    const document = {
+      markdown: "",
+    } as any;
+
+    const result = await performSummary(mockMeta, document);
+
+    expect(result.summary).toBeUndefined();
+    expect(result.warning).toContain(
+      "Summary generation was skipped because the markdown content is empty",
+    );
+  });
+
+  it("should skip summary generation when markdown is whitespace-only", async () => {
+    const mockMeta = {
+      options: { formats: [{ type: "summary" }] },
+      internalOptions: { zeroDataRetention: false, teamId: "test-team" },
+      logger: {
+        child: jest.fn(() => ({
+          info: jest.fn(),
+        })),
+      },
+      costTracking: {},
+      id: "test-id",
+    } as any;
+
+    const document = {
+      markdown: "   \n\t  ",
+    } as any;
+
+    const result = await performSummary(mockMeta, document);
+
+    expect(result.summary).toBeUndefined();
+    expect(result.warning).toContain(
+      "Summary generation was skipped because the markdown content is empty",
+    );
   });
 });

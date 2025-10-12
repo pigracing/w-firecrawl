@@ -25,7 +25,13 @@ import {
   saveCrawl,
   StoredCrawl,
 } from "../../lib/crawl-redis";
-import { addScrapeJob, addScrapeJobs } from "../queue-jobs";
+import { redisEvictConnection } from "../redis";
+import {
+  _addScrapeJobToBullMQ,
+  addScrapeJob,
+  addScrapeJobs,
+} from "../queue-jobs";
+import psl from "psl";
 import { getJobPriority } from "../../lib/job-priority";
 import { Document, scrapeOptions, TeamFlags } from "../../controllers/v2/types";
 import { hasFormatOfType } from "../../lib/format-utils";
@@ -34,7 +40,6 @@ import { createWebhookSender, WebhookEvent } from "../webhook";
 import { CustomError } from "../../lib/custom-error";
 import { startWebScraperPipeline } from "../../main/runWebScraper";
 import { CostTracking } from "../../lib/cost-tracking";
-import { redisEvictConnection } from "../redis";
 import { normalizeUrlOnlyHostname } from "../../lib/canonical-url";
 import { isUrlBlocked } from "../../scraper/WebScraper/utils/blocklist";
 import { BLOCKLISTED_URL_MESSAGE } from "../../lib/strings";
@@ -45,9 +50,6 @@ import { calculateCreditsToBeBilled } from "../../lib/scrape-billing";
 import { getBillingQueue } from "../queue-service";
 import type { Logger } from "winston";
 import { finishCrawlIfNeeded } from "./crawl-logic";
-import { LangfuseExporter } from "langfuse-vercel";
-import { getNodeAutoInstrumentations } from "@opentelemetry/auto-instrumentations-node";
-import { NodeSDK } from "@opentelemetry/sdk-node";
 import {
   RacedRedirectError,
   ScrapeJobTimeoutError,
@@ -55,11 +57,20 @@ import {
   UnknownError,
 } from "../../lib/error";
 import { serializeTransportableError } from "../../lib/error-serde";
-import { BatchSpanProcessor } from "@opentelemetry/sdk-trace-node";
-import { OTLPTraceExporter } from "@opentelemetry/exporter-trace-otlp-grpc";
-import { resourceFromAttributes } from "@opentelemetry/resources";
-import { ATTR_SERVICE_NAME } from "@opentelemetry/semantic-conventions";
 import type { NuQJob } from "./nuq";
+import {
+  ScrapeJobData,
+  ScrapeJobKickoff,
+  ScrapeJobKickoffSitemap,
+  ScrapeJobSingleUrls,
+} from "../../types";
+import { scrapeSitemap } from "../../scraper/crawler/sitemap";
+import { shutdownOtel } from "../../otel";
+import {
+  withTraceContextAsync,
+  withSpan,
+  setSpanAttributes,
+} from "../../lib/otel-tracer";
 
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
@@ -138,7 +149,7 @@ async function billScrapeJob(
   return creditsToBeBilled;
 }
 
-async function processJob(job: NuQJob<any>) {
+async function processJob(job: NuQJob<ScrapeJobSingleUrls>) {
   const logger = _logger.child({
     module: "queue-worker",
     method: "processJob",
@@ -224,7 +235,6 @@ async function processJob(job: NuQJob<any>) {
           },
         ],
       },
-      project_id: job.data.project_id,
       document: doc,
     };
 
@@ -243,7 +253,7 @@ async function processJob(job: NuQJob<any>) {
           sc,
           (await getACUCTeam(job.data.team_id))?.flags ?? null,
         );
-        const filterResult = crawler.filterURL(
+        const filterResult = await crawler.filterURL(
           doc.metadata.url,
           doc.metadata.sourceURL,
         );
@@ -323,6 +333,20 @@ async function processJob(job: NuQJob<any>) {
           logger.debug("Discovered " + links.links.length + " links...", {
             linksLength: links.links.length,
           });
+
+          // Store robots blocked URLs in Redis set
+          for (const [url, reason] of links.denialReasons) {
+            if (reason === "URL blocked by robots.txt") {
+              await redisEvictConnection.sadd(
+                "crawl:" + job.data.crawl_id + ":robots_blocked",
+                url,
+              );
+              await redisEvictConnection.expire(
+                "crawl:" + job.data.crawl_id + ":robots_blocked",
+                24 * 60 * 60,
+              );
+            }
+          }
 
           for (const link of links.links) {
             if (await lockURL(job.data.crawl_id, sc, link)) {
@@ -441,7 +465,7 @@ async function processJob(job: NuQJob<any>) {
         job.data.internalOptions?.bypassBilling ?? false,
       );
 
-      if (job.data.mode !== "crawl" && job.data.v1) {
+      if (job.data.v1) {
         const sender = await createWebhookSender({
           teamId: job.data.team_id,
           jobId: job.data.crawl_id,
@@ -574,7 +598,6 @@ async function processJob(job: NuQJob<any>) {
     const data = {
       success: false,
       document: null,
-      project_id: job.data.project_id,
       error:
         error instanceof Error
           ? error
@@ -583,7 +606,7 @@ async function processJob(job: NuQJob<any>) {
             : new Error(JSON.stringify(error)),
     };
 
-    if (job.data.mode === "crawl" || job.data.crawl_id) {
+    if (job.data.crawl_id) {
       const sender = await createWebhookSender({
         teamId: job.data.team_id,
         jobId: (job.data.crawl_id ?? job.id) as string,
@@ -686,7 +709,7 @@ async function kickoffGetIndexLinks(
   );
 
   const validIndexLinksResult = await crawler.filterLinks(
-    index.filter(x => crawler.filterURL(x, trimmedURL.href).allowed),
+    index,
     sc.crawlerOptions.limit ?? 10000,
     sc.crawlerOptions.maxDepth ?? 10,
     false,
@@ -696,7 +719,65 @@ async function kickoffGetIndexLinks(
   return validIndexLinks;
 }
 
-async function processKickoffJob(job: NuQJob<any>) {
+async function addKickoffSitemapJob(
+  sitemapUrl: string,
+  sourceJob: NuQJob<ScrapeJobKickoff | ScrapeJobKickoffSitemap>,
+  sc: StoredCrawl,
+  logger: Logger,
+) {
+  // TEMP: max 20 sitemaps per crawl
+  if (
+    (await redisEvictConnection.scard(
+      "crawl:" + sourceJob.data.crawl_id + ":sitemaps",
+    )) >= 20
+  ) {
+    logger.debug("Sitemap limit reached, skipping...", { sitemap: sitemapUrl });
+    return;
+  }
+
+  const sitemapLocked =
+    (await redisEvictConnection.sadd(
+      "crawl:" + sourceJob.data.crawl_id + ":sitemaps",
+      sitemapUrl,
+    )) === 1;
+  await redisEvictConnection.expire(
+    "crawl:" + sourceJob.data.crawl_id + ":sitemaps",
+    24 * 60 * 60,
+  );
+  if (!sitemapLocked) {
+    logger.debug("Sitemap already hit, skipping...", { sitemap: sitemapUrl });
+    return;
+  }
+
+  const jobId = uuidv4();
+  await _addScrapeJobToBullMQ(
+    {
+      mode: "kickoff_sitemap" as const,
+      team_id: sourceJob.data.team_id,
+      zeroDataRetention:
+        sourceJob.data.zeroDataRetention || (sc.zeroDataRetention ?? false),
+      sitemapUrl: sitemapUrl,
+      origin: sourceJob.data.origin,
+      integration: sourceJob.data.integration,
+      crawl_id: sourceJob.data.crawl_id,
+      webhook: sourceJob.data.webhook,
+      v1: sourceJob.data.v1,
+      apiKeyId: sourceJob.data.apiKeyId,
+    } satisfies ScrapeJobKickoffSitemap,
+    jobId,
+    21,
+  );
+  await redisEvictConnection.sadd(
+    "crawl:" + sourceJob.data.crawl_id + ":sitemap_jobs",
+    jobId,
+  );
+  await redisEvictConnection.expire(
+    "crawl:" + sourceJob.data.crawl_id + ":sitemap_jobs",
+    24 * 60 * 60,
+  );
+}
+
+async function processKickoffJob(job: NuQJob<ScrapeJobKickoff>) {
   const logger = _logger.child({
     module: "queue-worker",
     method: "processKickoffJob",
@@ -757,68 +838,36 @@ async function processKickoffJob(job: NuQJob<any>) {
       }
     }
 
-    const sitemap = sc.crawlerOptions.ignoreSitemap
-      ? 0
-      : await crawler.tryGetSitemap(async urls => {
-          if (urls.length === 0) return;
+    if (!sc.crawlerOptions.ignoreSitemap) {
+      if (job.data.url.endsWith(".xml") || job.data.url.endsWith(".xml.gz")) {
+        await addKickoffSitemapJob(job.data.url, job, sc, logger);
+      } else {
+        const urlObj = new URL(job.data.url);
 
-          logger.debug("Using sitemap chunk of length " + urls.length, {
-            sitemapLength: urls.length,
-          });
+        const attempts: string[] = crawler.robots.getSitemaps();
 
-          let jobPriority = await getJobPriority({
-            team_id: job.data.team_id,
-            basePriority: 21,
-          });
-          logger.debug("Using job priority " + jobPriority, { jobPriority });
+        // Append sitemap.xml
+        const urlWithSitemap = new URL(urlObj.href);
+        urlWithSitemap.pathname =
+          urlWithSitemap.pathname +
+          (urlObj.pathname.endsWith("/") ? "" : "/") +
+          "sitemap.xml";
+        urlWithSitemap.search = "";
+        urlWithSitemap.hash = "";
+        attempts.push(urlWithSitemap.href);
 
-          const jobs = urls.map(url => {
-            const uuid = uuidv4();
-            return {
-              data: {
-                url,
-                mode: "single_urls" as const,
-                team_id: job.data.team_id,
-                crawlerOptions: job.data.crawlerOptions,
-                scrapeOptions: job.data.scrapeOptions,
-                internalOptions: sc.internalOptions,
-                origin: job.data.origin,
-                integration: job.data.integration,
-                crawl_id: job.data.crawl_id,
-                sitemapped: true,
-                webhook: job.data.webhook,
-                v1: job.data.v1,
-                zeroDataRetention: job.data.zeroDataRetention,
-                apiKeyId: job.data.apiKeyId,
-              },
-              jobId: uuid,
-              priority: jobPriority,
-            };
-          });
+        // Base sitemap.xml
+        attempts.push(new URL("/sitemap.xml", urlObj.href).href);
 
-          logger.debug("Locking URLs...");
-          const lockedIds = await lockURLsIndividually(
-            job.data.crawl_id,
-            sc,
-            jobs.map(x => ({ id: x.jobId, url: x.data.url })),
-          );
-          const lockedJobs = jobs.filter(x =>
-            lockedIds.find(y => y.id === x.jobId),
-          );
-          logger.debug("Adding scrape jobs to Redis...");
-          await addCrawlJobs(
-            job.data.crawl_id,
-            lockedJobs.map(x => x.jobId),
-            logger,
-          );
-          logger.debug("Adding scrape jobs to BullMQ...");
-          await addScrapeJobs(lockedJobs);
-        });
+        // Root domain sitemap.xml
+        const urlRootSitemap = new URL("/sitemap.xml", urlObj.href);
+        urlRootSitemap.hostname = psl.parse(urlObj.hostname).domain;
+        attempts.push(urlRootSitemap.href);
 
-    if (sitemap === 0) {
-      logger.debug("Sitemap not found or ignored.", {
-        ignoreSitemap: sc.crawlerOptions.ignoreSitemap,
-      });
+        for (const attempt of attempts) {
+          await addKickoffSitemapJob(attempt, job, sc, logger);
+        }
+      }
     }
 
     const indexLinks = await kickoffGetIndexLinks(sc, crawler, job.data.url);
@@ -894,7 +943,128 @@ async function processKickoffJob(job: NuQJob<any>) {
   }
 }
 
-export const processJobInternal = async (job: NuQJob<any>) => {
+async function processKickoffSitemapJob(job: NuQJob<ScrapeJobKickoffSitemap>) {
+  const logger = _logger.child({
+    module: "queue-worker",
+    method: "processKickoffSitemapJob",
+    jobId: job.id,
+    scrapeId: job.id,
+    crawlId: job.data.crawl_id,
+    zeroDataRetention: job.data.zeroDataRetention ?? false,
+  });
+
+  const sc = await getCrawl(job.data.crawl_id);
+
+  try {
+    if (!sc) {
+      logger.error("Crawl not found");
+      return { success: false, error: "Crawl not found" };
+    }
+
+    const crawler = crawlToCrawler(
+      job.data.crawl_id,
+      sc,
+      (await getACUCTeam(job.data.team_id))?.flags ?? null,
+    );
+
+    const results = await scrapeSitemap({
+      url: job.data.sitemapUrl,
+      maxAge: 48 * 60 * 60 * 1000,
+      zeroDataRetention: job.data.zeroDataRetention ?? false,
+      location: job.data.location,
+      crawlId: job.data.crawl_id,
+      logger,
+    });
+
+    const passingURLs = (
+      await crawler.filterLinks(
+        results.urls.map(x => x.href),
+        Infinity,
+        sc.crawlerOptions.maxDepth ?? 10,
+        false,
+      )
+    ).links;
+
+    if (passingURLs.length > 0) {
+      logger.debug("Using urls of length " + passingURLs.length, {
+        urlsLength: passingURLs.length,
+      });
+
+      const jobPriority = await getJobPriority({
+        team_id: job.data.team_id,
+        basePriority: 21,
+      });
+
+      const jobs = passingURLs.map(url => ({
+        data: {
+          url: url,
+          mode: "single_urls" as const,
+          team_id: job.data.team_id,
+          crawlerOptions: sc.crawlerOptions,
+          scrapeOptions: sc.scrapeOptions,
+          internalOptions: sc.internalOptions,
+          origin: job.data.origin,
+          integration: job.data.integration,
+          crawl_id: job.data.crawl_id,
+          sitemapped: true,
+          webhook: job.data.webhook,
+          v1: job.data.v1,
+          zeroDataRetention:
+            job.data.zeroDataRetention || (sc.zeroDataRetention ?? false),
+          apiKeyId: job.data.apiKeyId,
+        } satisfies ScrapeJobSingleUrls,
+        jobId: uuidv4(),
+        priority: jobPriority,
+      }));
+
+      const urls = await lockURLsIndividually(
+        job.data.crawl_id,
+        sc,
+        jobs.map(x => ({ id: x.jobId, url: x.data.url })),
+      );
+      const winningIds = new Set(urls.map(x => x.id));
+      await addCrawlJobs(
+        job.data.crawl_id,
+        urls.map(x => x.id),
+        logger,
+      );
+      await addScrapeJobs(jobs.filter(x => winningIds.has(x.jobId)));
+
+      logger.debug("Done queueing jobs!");
+    }
+
+    if (results.sitemaps.length > 0) {
+      logger.debug("Using sitemaps of length " + results.sitemaps.length, {
+        sitemapsLength: results.sitemaps.length,
+      });
+
+      for (const sitemap of results.sitemaps) {
+        await addKickoffSitemapJob(sitemap.href, job, sc, logger);
+      }
+
+      logger.debug("Done queueing sitemap jobs!");
+    }
+    return { success: true };
+  } catch (error) {
+    logger.error("An error occurred!", { error });
+    return { success: false, error };
+  } finally {
+    await redisEvictConnection.sadd(
+      "crawl:" + job.data.crawl_id + ":sitemap_jobs_done",
+      job.id,
+    );
+    await redisEvictConnection.expire(
+      "crawl:" + job.data.crawl_id + ":sitemap_jobs_done",
+      24 * 60 * 60,
+    );
+
+    if (sc) {
+      await finishCrawlIfNeeded(job, sc);
+    }
+  }
+}
+
+export const processJobInternal = async (job: NuQJob<ScrapeJobData>) => {
   const logger = _logger.child({
     module: "queue-worker",
     method: "processJobInternal",
@@ -904,6 +1074,27 @@ export const processJobInternal = async (job: NuQJob<any>) => {
     zeroDataRetention: job.data?.zeroDataRetention ?? false,
   });
 
+  // Restore trace context if available and execute within span
+  if (job.data.traceContext) {
+    return withTraceContextAsync(job.data.traceContext, () =>
+      withSpan("worker.scrape.process", async span => {
+        setSpanAttributes(span, {
+          "worker.job_id": job.id,
+          "worker.mode": job.data.mode,
+          "worker.team_id": job.data.team_id,
+          "worker.crawl_id": job.data.crawl_id || "none",
+          "worker.url": job.data.mode === "single_urls" ? job.data.url : "n/a",
+        });
+
+        return processJobWithTracing(job, logger);
+      }),
+    );
+  } else {
+    return processJobWithTracing(job, logger);
+  }
+};
+
+async function processJobWithTracing(job: NuQJob<ScrapeJobData>, logger: any) {
   try {
     try {
       let extendLockInterval: NodeJS.Timeout | null = null;
@@ -919,15 +1110,26 @@ export const processJobInternal = async (job: NuQJob<any>) => {
 
       await addJobPriority(job.data.team_id, job.id);
       try {
-        if (job.data?.mode === "kickoff") {
-          const result = await processKickoffJob(job);
+        if (job.data.mode === "kickoff") {
+          const result = await processKickoffJob(
+            job as NuQJob<ScrapeJobKickoff>,
+          );
+          if (result.success) {
+            return null;
+          } else {
+            throw (result as any).error;
+          }
+        } else if (job.data.mode === "kickoff_sitemap") {
+          const result = await processKickoffSitemapJob(
+            job as NuQJob<ScrapeJobKickoffSitemap>,
+          );
           if (result.success) {
             return null;
           } else {
             throw (result as any).error;
           }
         } else {
-          const result = await processJob(job);
+          const result = await processJob(job as NuQJob<ScrapeJobSingleUrls>);
           if (result.success) {
             try {
               if (job.data.team_id) {
@@ -973,44 +1175,13 @@ export const processJobInternal = async (job: NuQJob<any>) => {
       throw new Error(serializeTransportableError(new UnknownError(error)));
     }
   }
-};
-
-const shouldOtel =
-  process.env.LANGFUSE_PUBLIC_KEY || process.env.OTEL_EXPORTER_OTLP_ENDPOINT;
-const otelSdk = shouldOtel
-  ? new NodeSDK({
-      resource: resourceFromAttributes({
-        [ATTR_SERVICE_NAME]: "firecrawl-worker-scrape",
-      }),
-      spanProcessors: [
-        ...(process.env.LANGFUSE_PUBLIC_KEY
-          ? [new BatchSpanProcessor(new LangfuseExporter())]
-          : []),
-        ...(process.env.OTEL_EXPORTER_OTLP_ENDPOINT
-          ? [
-              new BatchSpanProcessor(
-                new OTLPTraceExporter({
-                  url: process.env.OTEL_EXPORTER_OTLP_ENDPOINT,
-                }),
-              ),
-            ]
-          : []),
-      ],
-      instrumentations: [getNodeAutoInstrumentations()],
-    })
-  : null;
-
-if (otelSdk) {
-  otelSdk.start();
 }
 
 const exitHandler = () => {
-  if (otelSdk) {
-    otelSdk.shutdown().finally(() => {
-      _logger.debug("OTEL shutdown");
-      process.exit(0);
-    });
-  }
+  shutdownOtel().finally(() => {
+    _logger.debug("OTEL shutdown");
+    process.exit(0);
+  });
 };
 
 process.on("SIGINT", exitHandler);

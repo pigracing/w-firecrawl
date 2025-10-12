@@ -36,7 +36,7 @@ export async function scrapeStatusController(req: any, res: any) {
     });
   }
 
-  const jobData = await getJob(req.params.jobId);
+  const jobData = await getJob(req.params.jobId, logger);
   const data = Array.isArray(jobData?.returnvalue)
     ? jobData?.returnvalue[0]
     : jobData?.returnvalue;

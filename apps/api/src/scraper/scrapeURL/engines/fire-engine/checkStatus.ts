@@ -101,6 +101,7 @@ const successSchema = z.object({
   docUrl: z.string().optional(),
 
   usedMobileProxy: z.boolean().optional(),
+  youtubeTranscriptContent: z.any().optional(),
 });
 
 export type FireEngineCheckStatusSuccess = z.infer<typeof successSchema>;

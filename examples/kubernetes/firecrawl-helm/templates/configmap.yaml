@@ -11,3 +11,4 @@ data:
   PLAYWRIGHT_MICROSERVICE_URL: {{ .Values.config.PLAYWRIGHT_MICROSERVICE_URL | quote }}
   USE_DB_AUTHENTICATION: {{ .Values.config.USE_DB_AUTHENTICATION | quote }}
   HDX_NODE_BETA_MODE: {{ .Values.config.HDX_NODE_BETA_MODE | quote }}
+  NUQ_DATABASE_URL: {{ .Values.config.NUQ_DATABASE_URL | quote }}

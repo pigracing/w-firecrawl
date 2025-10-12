@@ -1,8 +1,8 @@
 import "dotenv/config";
+import { shutdownOtel } from "../otel";
 import "./sentry";
 import * as Sentry from "@sentry/node";
 import {
-  getExtractQueue,
   getDeepResearchQueue,
   getGenerateLlmsTxtQueue,
   getRedisConnection,
@@ -12,32 +12,14 @@ import { logger as _logger } from "../lib/logger";
 import systemMonitor from "./system-monitor";
 import { v4 as uuidv4 } from "uuid";
 import { configDotenv } from "dotenv";
-import {
-  ExtractResult,
-  performExtraction,
-} from "../lib/extract/extraction-service";
-import { updateExtract } from "../lib/extract/extract-redis";
 import { updateDeepResearch } from "../lib/deep-research/deep-research-redis";
 import { performDeepResearch } from "../lib/deep-research/deep-research-service";
 import { performGenerateLlmsTxt } from "../lib/generate-llmstxt/generate-llmstxt-service";
 import { updateGeneratedLlmsTxt } from "../lib/generate-llmstxt/generate-llmstxt-redis";
-import { performExtraction_F0 } from "../lib/extract/fire-0/extraction-service-f0";
-import { createWebhookSender, WebhookEvent } from "./webhook";
 import Express from "express";
-import http from "http";
-import https from "https";
-import { cacheableLookup } from "../scraper/scrapeURL/lib/cacheableLookup";
 import { robustFetch } from "../scraper/scrapeURL/lib/fetch";
-import { NodeSDK } from "@opentelemetry/sdk-node";
-import { getNodeAutoInstrumentations } from "@opentelemetry/auto-instrumentations-node";
-import { LangfuseExporter } from "langfuse-vercel";
-import { BatchSpanProcessor } from "@opentelemetry/sdk-trace-node";
-import { ATTR_SERVICE_NAME } from "@opentelemetry/semantic-conventions";
-import { resourceFromAttributes } from "@opentelemetry/resources";
-import { OTLPTraceExporter } from "@opentelemetry/exporter-trace-otlp-grpc";
 import { BullMQOtel } from "bullmq-otel";
-import { pathToFileURL } from "url";
-import { getErrorContactMessage } from "../lib/deployment";
+import { initializeBlocklist } from "../scraper/WebScraper/utils/blocklist";
 
 configDotenv();
 
@@ -55,166 +37,6 @@ const connectionMonitorInterval =
 const gotJobInterval = Number(process.env.CONNECTION_MONITOR_INTERVAL) || 20;
 
 const runningJobs: Set<string> = new Set();
-
-// Install cacheable lookup for all other requests
-cacheableLookup.install(http.globalAgent);
-cacheableLookup.install(https.globalAgent);
-
-const shouldOtel =
-  process.env.LANGFUSE_PUBLIC_KEY || process.env.OTEL_EXPORTER_OTLP_ENDPOINT;
-const otelSdk = shouldOtel
-  ? new NodeSDK({
-      resource: resourceFromAttributes({
-        [ATTR_SERVICE_NAME]: "firecrawl-worker",
-      }),
-      spanProcessors: [
-        ...(process.env.LANGFUSE_PUBLIC_KEY
-          ? [new BatchSpanProcessor(new LangfuseExporter())]
-          : []),
-        ...(process.env.OTEL_EXPORTER_OTLP_ENDPOINT
-          ? [
-              new BatchSpanProcessor(
-                new OTLPTraceExporter({
-                  url: process.env.OTEL_EXPORTER_OTLP_ENDPOINT,
-                }),
-              ),
-            ]
-          : []),
-      ],
-      instrumentations: [getNodeAutoInstrumentations()],
-    })
-  : null;
-
-if (otelSdk) {
-  otelSdk.start();
-}
-
-const processExtractJobInternal = async (
-  token: string,
-  job: Job & { id: string },
-) => {
-  const logger = _logger.child({
-    module: "extract-worker",
-    method: "processJobInternal",
-    jobId: job.id,
-    extractId: job.data.extractId,
-    teamId: job.data?.teamId ?? undefined,
-  });
-
-  const extendLockInterval = setInterval(async () => {
-    logger.info(`🔄 Worker extending lock on job ${job.id}`);
-    await job.extendLock(token, jobLockExtensionTime);
-  }, jobLockExtendInterval);
-
-  const sender = await createWebhookSender({
-    teamId: job.data.teamId,
-    jobId: job.data.extractId,
-    webhook: job.data.request.webhook,
-    v0: false,
-  });
-
-  try {
-    if (sender) {
-      sender.send(WebhookEvent.EXTRACT_STARTED, {
-        success: true,
-      });
-    }
-
-    let result: ExtractResult | null = null;
-
-    const model = job.data.request.agent?.model;
-    if (
-      job.data.request.agent &&
-      model &&
-      model.toLowerCase().includes("fire-1")
-    ) {
-      result = await performExtraction(job.data.extractId, {
-        request: job.data.request,
-        teamId: job.data.teamId,
-        subId: job.data.subId,
-        apiKeyId: job.data.apiKeyId,
-      });
-    } else {
-      result = await performExtraction_F0(job.data.extractId, {
-        request: job.data.request,
-        teamId: job.data.teamId,
-        subId: job.data.subId,
-        apiKeyId: job.data.apiKeyId,
-      });
-    }
-    // result = await performExtraction_F0(job.data.extractId, {
-    //   request: job.data.request,
-    //   teamId: job.data.teamId,
-    //   subId: job.data.subId,
-    // });
-
-    if (result && result.success) {
-      // Move job to completed state in Redis
-      await job.moveToCompleted(result, token, false);
-
-      if (sender) {
-        sender.send(WebhookEvent.EXTRACT_COMPLETED, {
-          success: true,
-          data: [result],
-        });
-      }
-
-      return result;
-    } else {
-      // throw new Error(result.error || "Unknown error during extraction");
-
-      await job.moveToCompleted(result, token, false);
-      await updateExtract(job.data.extractId, {
-        error: result?.error ?? getErrorContactMessage(job.data.extractId),
-      });
-
-      if (sender) {
-        sender.send(WebhookEvent.EXTRACT_FAILED, {
-          success: false,
-          error: result?.error ?? getErrorContactMessage(job.data.extractId),
-        });
-      }
-
-      return result;
-    }
-  } catch (error) {
-    logger.error(`🚫 Job errored ${job.id} - ${error}`, { error });
-
-    Sentry.captureException(error, {
-      data: {
-        job: job.id,
-      },
-    });
-
-    try {
-      // Move job to failed state in Redis
-      await job.moveToFailed(error, token, false);
-    } catch (e) {
-      logger.log("Failed to move job to failed state in Redis", { error });
-    }
-
-    await updateExtract(job.data.extractId, {
-      status: "failed",
-      error: error.error ?? error ?? getErrorContactMessage(job.data.extractId),
-    });
-
-    if (sender) {
-      sender.send(WebhookEvent.EXTRACT_FAILED, {
-        success: false,
-        error:
-          (error as any)?.message ?? getErrorContactMessage(job.data.extractId),
-      });
-    }
-
-    return {
-      success: false,
-      error: error.error ?? error ?? getErrorContactMessage(job.data.extractId),
-    };
-    // throw error;
-  } finally {
-    clearInterval(extendLockInterval);
-  }
-};
 
 const processDeepResearchJobInternal = async (
   token: string,
@@ -496,8 +318,12 @@ app.listen(workerPort, () => {
 });
 
 (async () => {
+  await initializeBlocklist().catch(e => {
+    _logger.error("Failed to initialize blocklist", { error: e });
+    process.exit(1);
+  });
+
   await Promise.all([
-    workerFun(getExtractQueue(), processExtractJobInternal),
     workerFun(getDeepResearchQueue(), processDeepResearchJobInternal),
     workerFun(getGenerateLlmsTxtQueue(), processGenerateLlmsTxtJobInternal),
   ]);
@@ -509,8 +335,6 @@ app.listen(workerPort, () => {
   }
 
   console.log("All jobs finished. Worker out!");
-  if (otelSdk) {
-    await otelSdk.shutdown();
-  }
+  await shutdownOtel();
   process.exit(0);
 })();

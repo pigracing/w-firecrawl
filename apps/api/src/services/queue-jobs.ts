@@ -1,5 +1,5 @@
 import { v4 as uuidv4 } from "uuid";
-import { NotificationType, RateLimiterMode, WebScraperOptions } from "../types";
+import { NotificationType, RateLimiterMode, ScrapeJobData } from "../types";
 import {
   cleanOldConcurrencyLimitEntries,
   getConcurrencyLimitActiveJobs,
@@ -21,6 +21,7 @@ import { ScrapeJobTimeoutError, TransportableError } from "../lib/error";
 import { deserializeTransportableError } from "../lib/error-serde";
 import { abTestJob } from "./ab-test";
 import { NuQJob, scrapeQueue } from "./worker/nuq";
+import { serializeTraceContext } from "../lib/otel-tracer";
 
 /**
  * Checks if a job is a crawl or batch scrape based on its options
@@ -40,6 +41,7 @@ async function _addScrapeJobToConcurrencyQueue(
   webScraperOptions: any,
   jobId: string,
   priority: number = 0,
+  listenable: boolean = false,
 ) {
   await pushConcurrencyLimitedJob(
     webScraperOptions.team_id,
@@ -47,6 +49,7 @@ async function _addScrapeJobToConcurrencyQueue(
       id: jobId,
       data: webScraperOptions,
       priority,
+      listenable,
     },
     webScraperOptions.crawl_id
       ? Infinity
@@ -55,11 +58,14 @@ async function _addScrapeJobToConcurrencyQueue(
 }
 
 export async function _addScrapeJobToBullMQ(
-  webScraperOptions: WebScraperOptions,
+  webScraperOptions: ScrapeJobData,
   jobId: string,
   priority: number = 0,
-): Promise<NuQJob<WebScraperOptions>> {
-  abTestJob(webScraperOptions);
+  listenable: boolean = false,
+): Promise<NuQJob<ScrapeJobData>> {
+  if (webScraperOptions.mode === "single_urls") {
+    abTestJob(webScraperOptions);
+  }
 
   if (webScraperOptions && webScraperOptions.team_id) {
     await pushConcurrencyLimitActiveJob(
@@ -70,7 +76,7 @@ export async function _addScrapeJobToBullMQ(
 
     if (webScraperOptions.crawl_id) {
       const sc = await getCrawl(webScraperOptions.crawl_id);
-      if (webScraperOptions.crawlerOptions?.delay || sc?.maxConcurrency) {
+      if (sc?.crawlerOptions?.delay || sc?.maxConcurrency) {
         await pushCrawlConcurrencyLimitActiveJob(
           webScraperOptions.crawl_id,
           jobId,
@@ -80,15 +86,16 @@ export async function _addScrapeJobToBullMQ(
     }
   }
 
-  return await scrapeQueue.addJob(jobId, webScraperOptions, priority);
+  return await scrapeQueue.addJob(jobId, webScraperOptions, priority, listenable);
 }
 
 async function addScrapeJobRaw(
-  webScraperOptions: WebScraperOptions,
+  webScraperOptions: ScrapeJobData,
   jobId: string,
   priority: number = 0,
   directToBullMQ: boolean = false,
-): Promise<NuQJob<WebScraperOptions> | null> {
+  listenable: boolean = false,
+): Promise<NuQJob<ScrapeJobData> | null> {
   let concurrencyLimited: "yes" | "yes-crawl" | "no" | null = null;
   let currentActiveConcurrency = 0;
   let maxConcurrency = 0;
@@ -124,7 +131,8 @@ async function addScrapeJobRaw(
             webScraperOptions.team_id,
             false,
             true,
-            webScraperOptions.is_extract
+            webScraperOptions.mode === "single_urls" &&
+              webScraperOptions.from_extract
               ? RateLimiterMode.Extract
               : RateLimiterMode.Crawl,
           )
@@ -173,42 +181,56 @@ async function addScrapeJobRaw(
 
     webScraperOptions.concurrencyLimited = true;
 
-    await _addScrapeJobToConcurrencyQueue(webScraperOptions, jobId);
+    await _addScrapeJobToConcurrencyQueue(webScraperOptions, jobId, priority, listenable);
     return null;
   } else {
-    return await _addScrapeJobToBullMQ(webScraperOptions, jobId, priority);
+    return await _addScrapeJobToBullMQ(webScraperOptions, jobId, priority, listenable);
   }
 }
 
 export async function addScrapeJob(
-  webScraperOptions: WebScraperOptions,
+  webScraperOptions: ScrapeJobData,
   jobId: string = uuidv4(),
   priority: number = 0,
   directToBullMQ: boolean = false,
-): Promise<NuQJob<WebScraperOptions> | null> {
+  listenable: boolean = false,
+): Promise<NuQJob<ScrapeJobData> | null> {
+  // Capture trace context to propagate to worker
+  const traceContext = serializeTraceContext();
+  const optionsWithTrace: ScrapeJobData = {
+    ...webScraperOptions,
+    traceContext,
+  };
+
   return await addScrapeJobRaw(
-    webScraperOptions,
+    optionsWithTrace,
     jobId,
     priority,
     directToBullMQ,
+    listenable,
   );
 }
 
 export async function addScrapeJobs(
   jobs: {
     jobId: string;
-    data: WebScraperOptions;
+    data: ScrapeJobData;
     priority: number;
+    listenable?: boolean;
   }[],
 ) {
   if (jobs.length === 0) return true;
+
+  // Capture trace context for all jobs
+  const traceContext = serializeTraceContext();
 
   const jobsByTeam = new Map<
     string,
     {
       jobId: string;
-      data: WebScraperOptions;
+      data: ScrapeJobData;
       priority: number;
+      listenable?: boolean;
     }[]
   >();
 
@@ -222,31 +244,35 @@ export async function addScrapeJobs(
   for (const [teamId, teamJobs] of jobsByTeam) {
     // == Buckets for jobs ==
     let jobsForcedToCQ: {
-      data: WebScraperOptions;
+      data: ScrapeJobData;
       jobId: string;
       priority: number;
+      listenable?: boolean;
     }[] = [];
 
     let jobsPotentiallyInCQ: {
-      data: WebScraperOptions;
+      data: ScrapeJobData;
       jobId: string;
       priority: number;
+      listenable?: boolean;
     }[] = [];
 
     // == Select jobs by crawl ID ==
     const jobsByCrawlID = new Map<
       string,
       {
-        data: WebScraperOptions;
+        data: ScrapeJobData;
         jobId: string;
         priority: number;
+        listenable?: boolean;
       }[]
     >();
 
     const jobsWithoutCrawlID: {
-      data: WebScraperOptions;
+      data: ScrapeJobData;
       jobId: string;
       priority: number;
+      listenable?: boolean;
     }[] = [];
 
     for (const job of teamJobs) {
@@ -297,7 +323,7 @@ export async function addScrapeJobs(
           teamId,
           false,
           true,
-          jobs[0].data.from_extract
+          jobs[0].data.mode === "single_urls" && jobs[0].data.from_extract
             ? RateLimiterMode.Extract
             : RateLimiterMode.Crawl,
         )
@@ -346,23 +372,29 @@ export async function addScrapeJobs(
       addToCQ.map(async job => {
         const size = JSON.stringify(job.data).length;
         await _addScrapeJobToConcurrencyQueue(
-          job.data,
+          { ...job.data, traceContext },
           job.jobId,
           job.priority,
+          job.listenable,
         );
       }),
     );
 
     await Promise.all(
       addToBull.map(async job => {
-        await _addScrapeJobToBullMQ(job.data, job.jobId, job.priority);
+        await _addScrapeJobToBullMQ(
+          { ...job.data, traceContext },
+          job.jobId,
+          job.priority,
+          job.listenable,
+        );
       }),
     );
   }
 }
 
 export async function waitForJob(
-  job: NuQJob<WebScraperOptions> | string,
+  job: NuQJob<ScrapeJobData> | string,
   timeout: number | null,
   zeroDataRetention: boolean,
   logger: Logger = _logger,
@@ -374,7 +406,11 @@ export async function waitForJob(
   try {
     doc = await Promise.race(
       [
-        scrapeQueue.waitForJob(jobId, timeout !== null ? timeout + 100 : null),
+        scrapeQueue.waitForJob(
+          jobId,
+          timeout !== null ? timeout + 100 : null,
+          logger,
+        ),
         timeout !== null
           ? new Promise<Document>((_resolve, reject) => {
               setTimeout(() => {

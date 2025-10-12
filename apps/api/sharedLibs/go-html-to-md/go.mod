@@ -4,7 +4,7 @@ go 1.23.0
 
 toolchain go1.24.0
 
-require github.com/tomkosm/html-to-markdown v0.0.0-20250128162844-2f19490e042d
+require github.com/firecrawl/html-to-markdown v0.0.0-20250922154302-32a7ad4a22c3
 
 require (
 	github.com/PuerkitoBio/goquery v1.10.3 // indirect
@@ -15,4 +15,4 @@ require (
 	gopkg.in/yaml.v2 v2.4.0 // indirect
 )
 
-replace github.com/JohannesKaufmann/html-to-markdown => github.com/tomkosm/html-to-markdown v0.0.0-20250128162844-2f19490e042d
+replace github.com/JohannesKaufmann/html-to-markdown => github.com/firecrawl/html-to-markdown v0.0.0-20250917145228-b6d0a75dfdba

@@ -7,6 +7,7 @@ import {
   idmux,
   Identity,
   scrapeRaw,
+  extractRaw,
 } from "./lib";
 import crypto from "crypto";
 
@@ -688,7 +689,7 @@ describe("Scrape tests", () => {
           const response1 = await scrape(
             {
               url,
-              location: { country: "DE" },
+              location: { country: "DE", languages: ["hu-HU", "de-DE"] },
               maxAge: scrapeTimeout * 2,
             },
             identity,
@@ -701,7 +702,7 @@ describe("Scrape tests", () => {
           const response2 = await scrape(
             {
               url,
-              location: { country: "DE" },
+              location: { country: "DE", languages: ["de-DE", "hu-HU"] },
               maxAge: scrapeTimeout * 3,
             },
             identity,
@@ -1297,6 +1298,25 @@ describe("Scrape tests", () => {
         scrapeTimeout * 5,
       );
     });
+
+    describe("YouTube (f-e dependant)", () => {
+      it.concurrent(
+        "scrapes YouTube videos and transcripts",
+        async () => {
+          const response = await scrape(
+            {
+              url: "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+              formats: ["markdown"],
+            },
+            identity,
+          );
+
+          expect(response.markdown).toContain("Rick Astley");
+          expect(response.markdown).toContain("Never gonna let you down");
+        },
+        scrapeTimeout,
+      );
+    });
   }
 
   describe("URL rewriting", () => {
@@ -1695,4 +1715,185 @@ describe("attributes format", () => {
     },
     scrapeTimeout,
   );
+
+  describe("Schema validation for additionalProperties", () => {
+    if (
+      !process.env.TEST_SUITE_SELF_HOSTED ||
+      process.env.OPENAI_API_KEY ||
+      process.env.OLLAMA_BASE_URL
+    ) {
+      it(
+        "should normalize scrape request with additionalProperties in json format schema",
+        async () => {
+          const identity = await idmux({ name: "schema-validation-test" });
+
+          const response = await scrapeRaw(
+            {
+              url: "https://example.com",
+              formats: [
+                {
+                  type: "json",
+                  schema: {
+                    type: "object",
+                    properties: {
+                      title: { type: "string" },
+                    },
+                    additionalProperties: false,
+                  },
+                },
+              ],
+            },
+            identity,
+          );
+
+          expect(response.statusCode).toBe(200);
+        },
+        scrapeTimeout,
+      );
+
+      it(
+        "should normalize extract request with additionalProperties in schema",
+        async () => {
+          const identity = await idmux({ name: "schema-validation-test" });
+
+          const response = await extractRaw(
+            {
+              urls: ["https://example.com"],
+              schema: {
+                type: "object",
+                properties: {
+                  title: { type: "string" },
+                },
+                additionalProperties: true,
+              },
+            },
+            identity,
+          );
+
+          expect(response.statusCode).toBe(200);
+        },
+        scrapeTimeout,
+      );
+
+      it(
+        "should normalize changeTracking format with additionalProperties",
+        async () => {
+          const identity = await idmux({ name: "schema-validation-test" });
+
+          const response = await scrapeRaw(
+            {
+              url: "https://example.com",
+              formats: [
+                { type: "markdown" },
+                {
+                  type: "changeTracking",
+                  schema: {
+                    type: "object",
+                    properties: {
+                      changes: { type: "string" },
+                    },
+                    additionalProperties: false,
+                  },
+                },
+              ],
+            },
+            identity,
+          );
+
+          expect(response.statusCode).toBe(200);
+        },
+        scrapeTimeout,
+      );
+
+      it(
+        "should accept valid schema without additionalProperties",
+        async () => {
+          const identity = await idmux({ name: "schema-validation-test" });
+
+          const response = await scrapeRaw(
+            {
+              url: "https://example.com",
+              formats: [
+                {
+                  type: "json",
+                  schema: {
+                    type: "object",
+                    properties: {
+                      title: { type: "string" },
+                    },
+                    required: ["title"],
+                  },
+                },
+              ],
+            },
+            identity,
+          );
+
+          expect(response.statusCode).toBe(200);
+        },
+        scrapeTimeout,
+      );
+
+      it(
+        "should reject schema-less dictionary (no properties but additionalProperties: true)",
+        async () => {
+          const identity = await idmux({ name: "schema-validation-test" });
+
+          const response = await scrapeRaw(
+            {
+              url: "https://example.com",
+              formats: [
+                {
+                  type: "json",
+                  schema: {
+                    type: "object",
+                    additionalProperties: true,
+                  },
+                },
+              ],
+            },
+            identity,
+          );
+
+          expect(response.statusCode).toBe(400);
+          expect(response.body.error).toContain("OpenAI");
+          expect(response.body.error).toContain("schema-less dictionary");
+        },
+        scrapeTimeout,
+      );
+
+      it(
+        "should normalize schema with object type without properties (but no additionalProperties)",
+        async () => {
+          const identity = await idmux({ name: "schema-validation-test" });
+
+          const response = await scrapeRaw(
+            {
+              url: "https://example.com",
+              formats: [
+                {
+                  type: "json",
+                  schema: {
+                    type: "object",
+                    properties: {
+                      address: { type: "string" },
+                      detail: {
+                        type: "object",
+                        description:
+                          "Any other specifications of the particular make and model in the page",
+                      },
+                    },
+                  },
+                },
+              ],
+            },
+            identity,
+          );
+
+          expect(response.statusCode).toBe(200);
+        },
+        scrapeTimeout,
+      );
+    }
+  });
 });

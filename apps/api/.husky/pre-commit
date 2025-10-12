@@ -1,1 +1,1 @@
-cd apps/api && pnpm lint-staged
+cd apps/api && pnpm knip --cache && pnpm lint-staged

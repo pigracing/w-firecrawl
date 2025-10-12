@@ -22,6 +22,9 @@ import { logger } from "../../lib/logger";
 import { supabase_rr_service, supabase_service } from "../../services/supabase";
 import { getJobFromGCS } from "../../lib/gcs-jobs";
 import { scrapeQueue, NuQJob, NuQJobStatus } from "../../services/worker/nuq";
+import { ScrapeJobSingleUrls } from "../../types";
+import { redisEvictConnection } from "../../../src/services/redis";
+import { isBaseDomain, extractBaseDomain } from "../../lib/url-utils";
 configDotenv();
 
 export type PseudoJob<T> = {
@@ -45,9 +48,15 @@ export type DBJob = {
   team_id: string;
 };
 
-export async function getJob(id: string): Promise<PseudoJob<any> | null> {
+export async function getJob(
+  id: string,
+  _logger = logger,
+): Promise<PseudoJob<any> | null> {
   const [nuqJob, dbJob, gcsJob] = await Promise.all([
-    scrapeQueue.getJob(id),
+    scrapeQueue.getJob(
+      id,
+      _logger,
+    ) as Promise<NuQJob<ScrapeJobSingleUrls> | null>,
     (process.env.USE_DB_AUTHENTICATION === "true"
       ? supabaseGetJobById(id)
       : null) as Promise<DBJob | null>,
@@ -58,9 +67,13 @@ export async function getJob(id: string): Promise<PseudoJob<any> | null> {
 
   if (!nuqJob && !dbJob) return null;
 
+  if (nuqJob && nuqJob.data.mode !== "single_urls") {
+    return null;
+  }
+
   const data = gcsJob ?? dbJob?.docs ?? nuqJob?.returnvalue;
   if (gcsJob === null && data) {
-    logger.warn("GCS Job not found", {
+    _logger.warn("GCS Job not found", {
       jobId: id,
     });
   }
@@ -81,9 +94,12 @@ export async function getJob(id: string): Promise<PseudoJob<any> | null> {
   return job;
 }
 
-export async function getJobs(ids: string[]): Promise<PseudoJob<any>[]> {
+export async function getJobs(
+  ids: string[],
+  _logger = logger,
+): Promise<PseudoJob<any>[]> {
   const [nuqJobs, dbJobs, gcsJobs] = await Promise.all([
-    scrapeQueue.getJobs(ids),
+    scrapeQueue.getJobs(ids, _logger) as Promise<NuQJob<ScrapeJobSingleUrls>[]>,
     process.env.USE_DB_AUTHENTICATION === "true"
       ? supabaseGetJobsById(ids)
       : [],
@@ -184,28 +200,39 @@ export async function crawlStatusController(
       .eq("job_id", req.params.jobId)
       .limit(1);
 
-    if (crawlJobError) {
-      logger.error("Error getting crawl job", { error: crawlJobError });
-      throw new Error("Error getting crawl job", { cause: crawlJobError });
+    let crawlAdded: Date;
+    let crawlTeamId: string;
+
+    if (crawlJobError || !crawlJobs || crawlJobs.length === 0) {
+      const { data: scrapeJobs, error: scrapeJobError } =
+        await supabase_rr_service
+          .from("firecrawl_jobs")
+          .select("*")
+          .eq("crawl_id", req.params.jobId)
+          .order("date_added", { ascending: false })
+          .limit(1);
+
+      if (scrapeJobError || !scrapeJobs || scrapeJobs.length === 0) {
+        return res.status(404).json({ success: false, error: "Job not found" });
+      }
+
+      const scrapeJob = scrapeJobs[0];
+      crawlAdded = new Date(scrapeJob.date_added); // use last scrape as date added for crawl
+      crawlTeamId = scrapeJob.team_id;
+    } else {
+      const crawlJob = crawlJobs[0];
+      crawlAdded = new Date(crawlJob.date_added);
+      crawlTeamId = crawlJob.team_id;
     }
 
-    if (!crawlJobs || crawlJobs.length === 0) {
-      return res.status(404).json({ success: false, error: "Job not found" });
-    }
-
-    const crawlJob = crawlJobs[0];
-
-    if (crawlJob.team_id !== req.auth.team_id) {
+    if (crawlTeamId !== req.auth.team_id) {
       return res.status(404).json({ success: false, error: "Job not found" });
     }
 
     const crawlTtlHours = req.acuc?.flags?.crawlTtlHours ?? 24;
     const crawlTtlMs = crawlTtlHours * 60 * 60 * 1000;
 
-    if (
-      new Date().valueOf() - new Date(crawlJob.date_added).valueOf() >
-      crawlTtlMs
-    ) {
+    if (new Date().valueOf() - crawlAdded.valueOf() > crawlTtlMs) {
       return res.status(404).json({ success: false, error: "Job expired" });
     }
   } else {
@@ -321,7 +348,68 @@ export async function crawlStatusController(
     next: string | undefined;
   };
 
-  if (process.env.USE_DB_AUTHENTICATION === "true" && !isPreviewTeam) {
+  if (sc || process.env.USE_DB_AUTHENTICATION !== "true" || isPreviewTeam) {
+    const doneJobs = await getDoneJobsOrderedUntil(
+      req.params.jobId,
+      djoCutoff,
+      start,
+      end !== undefined ? end - start : 100,
+    );
+
+    let scrapes: Document[] = [];
+    let iteratedOver = 0;
+    let bytes = 0;
+    const bytesLimit = 10485760; // 10 MiB in bytes
+
+    for (let i = 0; i < Math.ceil(doneJobs.length / 50); i++) {
+      const jobIds = doneJobs.slice(i * 50, (i + 1) * 50);
+      const jobs = await getJobs(jobIds, logger);
+
+      for (const job of jobs) {
+        if (job.status === "failed") {
+          continue;
+        } else {
+          if (job?.returnvalue) {
+            scrapes.push(job.returnvalue);
+            bytes += JSON.stringify(job.returnvalue).length;
+          } else {
+            logger.warn(
+              "Job was considered done, but returnvalue is undefined!",
+              {
+                scrapeId: job.id,
+                crawlId: req.params.jobId,
+                state: job.status,
+                returnvalue: job?.returnvalue,
+              },
+            );
+          }
+
+          iteratedOver++;
+        }
+
+        if (bytes > bytesLimit) {
+          break;
+        }
+      }
+
+      if (bytes > bytesLimit) {
+        break;
+      }
+    }
+
+    if (bytes > bytesLimit && scrapes.length !== 1) {
+      scrapes.splice(scrapes.length - 1, 1);
+      iteratedOver--;
+    }
+
+    outputBulkB = {
+      data: scrapes,
+      next:
+        (outputBulkA.total ?? 0) > start + iteratedOver
+          ? `${process.env.ENV === "local" ? req.protocol : "https"}://${req.get("host")}/v2/${isBatch ? "batch/scrape" : "crawl"}/${req.params.jobId}?skip=${start + iteratedOver}${req.query.limit ? `&limit=${req.query.limit}` : ""}`
+          : undefined,
+    };
+  } else {
     // new DB-based path
     const { data, error } = await supabase_service.rpc(
       "crawl_status_1",
@@ -379,67 +467,39 @@ export async function crawlStatusController(
           ? `${process.env.ENV === "local" ? req.protocol : "https"}://${req.get("host")}/v2/${isBatch ? "batch/scrape" : "crawl"}/${req.params.jobId}?skip=${start + iteratedOver}${req.query.limit ? `&limit=${req.query.limit}` : ""}`
           : undefined,
     };
-  } else {
-    const doneJobs = await getDoneJobsOrderedUntil(
-      req.params.jobId,
-      djoCutoff,
-      start,
-      end !== undefined ? end - start : 100,
+  }
+
+  // Check for robots.txt blocked URLs and add warning if found
+  let warning: string | undefined;
+  try {
+    const robotsBlocked = await redisEvictConnection.smembers(
+      "crawl:" + req.params.jobId + ":robots_blocked",
     );
+    if (robotsBlocked && robotsBlocked.length > 0) {
+      warning =
+        "One or more pages were unable to be crawled because the robots.txt file prevented this. Please use the /scrape endpoint instead.";
+    }
+  } catch (error) {
+    // If we can't check robots blocked URLs, continue without warning
+    logger.debug("Failed to check robots blocked URLs", { error });
+  }
 
-    let scrapes: Document[] = [];
-    let iteratedOver = 0;
-    let bytes = 0;
-    const bytesLimit = 10485760; // 10 MiB in bytes
-
-    for (let i = 0; i < Math.ceil(doneJobs.length / 50); i++) {
-      const jobIds = doneJobs.slice(i * 50, (i + 1) * 50);
-      const jobs = await getJobs(jobIds);
-
-      for (const job of jobs) {
-        if (job.status === "failed") {
-          continue;
-        } else {
-          if (job?.returnvalue) {
-            scrapes.push(job.returnvalue);
-            bytes += JSON.stringify(job.returnvalue).length;
-          } else {
-            logger.warn(
-              "Job was considered done, but returnvalue is undefined!",
-              {
-                scrapeId: job.id,
-                crawlId: req.params.jobId,
-                state: job.status,
-                returnvalue: job?.returnvalue,
-              },
-            );
-          }
-
-          iteratedOver++;
-        }
-
-        if (bytes > bytesLimit) {
-          break;
+  // Check if we should warn about base domain for crawl results
+  const resultCount = outputBulkA.completed ?? outputBulkA.total ?? outputBulkB.data.length;
+  if (!warning && resultCount <= 1) {
+    // Get the original crawl URL and options from stored crawl data
+    const crawl = await getCrawl(req.params.jobId);
+    if (crawl && crawl.originUrl && !isBaseDomain(crawl.originUrl)) {
+      // Don't show warning if user is already using crawlEntireDomain
+      const isUsingCrawlEntireDomain =
+        crawl.crawlerOptions?.crawlEntireDomain === true;
+      if (!isUsingCrawlEntireDomain) {
+        const baseDomain = extractBaseDomain(crawl.originUrl);
+        if (baseDomain) {
+          warning = `Only ${resultCount} result(s) found. For broader coverage, try crawling with crawlEntireDomain=true or start from a higher-level path like ${baseDomain}`;
         }
       }
-
-      if (bytes > bytesLimit) {
-        break;
-      }
     }
-
-    if (bytes > bytesLimit && scrapes.length !== 1) {
-      scrapes.splice(scrapes.length - 1, 1);
-      iteratedOver--;
-    }
-
-    outputBulkB = {
-      data: scrapes,
-      next:
-        (outputBulkA.total ?? 0) > start + iteratedOver
-          ? `${process.env.ENV === "local" ? req.protocol : "https"}://${req.get("host")}/v2/${isBatch ? "batch/scrape" : "crawl"}/${req.params.jobId}?skip=${start + iteratedOver}${req.query.limit ? `&limit=${req.query.limit}` : ""}`
-          : undefined,
-    };
   }
 
   return res.status(200).json({
@@ -451,5 +511,6 @@ export async function crawlStatusController(
     expiresAt: (await getCrawlExpiry(req.params.jobId)).toISOString(),
     next: outputBulkB.next,
     data: outputBulkB.data,
+    ...(warning && { warning }),
   });
 }

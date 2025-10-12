@@ -17,6 +17,7 @@ import {
   UnsupportedFileError,
 } from "../../error";
 import { Meta } from "../..";
+import { abTestFireEngine } from "../../../../services/ab-test";
 
 export type FireEngineScrapeRequestCommon = {
   url: string;
@@ -49,7 +50,7 @@ export type FireEngineScrapeRequestChromeCDP = {
   engine: "chrome-cdp";
   skipTlsVerification?: boolean;
   actions?: Action[];
-  blockMedia?: true; // cannot be false
+  blockMedia?: boolean;
   mobile?: boolean;
   disableSmartWaitCache?: boolean;
 };
@@ -150,6 +151,7 @@ const successSchema = z.object({
   docUrl: z.string().optional(),
 
   usedMobileProxy: z.boolean().optional(),
+  youtubeTranscriptContent: z.any().optional(),
 });
 
 type FireEngineCheckStatusSuccess = z.infer<typeof successSchema>;
@@ -181,6 +183,8 @@ export async function fireEngineScrape<
   abort?: AbortSignal,
   production = true,
 ): Promise<z.infer<typeof processingSchema> | FireEngineCheckStatusSuccess> {
+  abTestFireEngine(request);
+
   let status = await robustFetch({
     url: `${production ? fireEngineURL : fireEngineStagingURL}/scrape`,
     method: "POST",

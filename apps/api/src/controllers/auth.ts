@@ -94,6 +94,7 @@ const mockPreviewACUC: (
   },
   price_credits: 99999999,
   price_should_be_graceful: false,
+  price_associated_auto_recharge_price_id: null,
   credits_used: 0,
   coupon_credits: 99999999,
   adjusted_credits_used: 0,
@@ -133,6 +134,7 @@ const mockACUC: () => AuthCreditUsageChunk = () => ({
   },
   price_credits: 99999999,
   price_should_be_graceful: false,
+  price_associated_auto_recharge_price_id: null,
   credits_used: 0,
   coupon_credits: 99999999,
   adjusted_credits_used: 0,
@@ -188,7 +190,7 @@ export async function getACUC(
       const client =
         Math.random() > 2 / 3 ? supabase_rr_service : supabase_service;
       ({ data, error } = await client.rpc(
-        "auth_credit_usage_chunk_34",
+        "auth_credit_usage_chunk_35",
         {
           input_key: api_key,
           i_is_extract: isExtract,
@@ -315,7 +317,7 @@ export async function getACUCTeam(
       const client =
         Math.random() > 2 / 3 ? supabase_rr_service : supabase_service;
       ({ data, error } = await client.rpc(
-        "auth_credit_usage_chunk_34_from_team",
+        "auth_credit_usage_chunk_35_from_team",
         {
           input_team: team_id,
           i_is_extract: isExtract,

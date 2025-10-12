@@ -25,6 +25,46 @@ import { extractData } from "../lib/extractSmartScrape";
 import { CostTracking } from "../../../lib/cost-tracking";
 import { isAgentExtractModelValid } from "../../../controllers/v1/types";
 import { hasFormatOfType } from "../../../lib/format-utils";
+
+// Smart model selection based on schema
+function detectRecursiveSchema(schema: any): boolean {
+  if (!schema || typeof schema !== "object") return false;
+
+  const schemaString = JSON.stringify(schema);
+  const hasRefs =
+    schemaString.includes('"$ref"') ||
+    schemaString.includes("#/$defs/") ||
+    schemaString.includes("#/definitions/");
+  const hasDefs = !!(schema.$defs || schema.definitions);
+
+  return hasRefs || hasDefs;
+}
+
+function selectModelForSchema(schema?: any): {
+  modelName: string;
+  reason: string;
+} {
+  if (!schema) {
+    return { modelName: "gpt-4o-mini", reason: "no_schema" };
+  }
+
+  const isRecursive = detectRecursiveSchema(schema);
+
+  if (isRecursive) {
+    logger.info(`Model: gpt-4o | hasRef: true`);
+    return {
+      modelName: "gpt-4o",
+      reason: "recursive_schema_detected",
+    };
+  }
+
+  logger.info(`Model: gpt-4o-mini | hasRef: false`);
+  return {
+    modelName: "gpt-4o-mini",
+    reason: "simple_schema",
+  };
+}
+
 // TODO: fix this, it's horrible
 type LanguageModelV1ProviderMetadata = {
   anthropic?: {
@@ -190,6 +230,12 @@ export function calculateCost(
     "gpt-4o-mini": { input_cost: 0.15, output_cost: 0.6 },
     "openai/gpt-4o-mini": { input_cost: 0.15, output_cost: 0.6 },
     "openai/gpt-4o": { input_cost: 2.5, output_cost: 10 },
+    "gpt-5": { input_cost: 1.25, output_cost: 10 },
+    "openai/gpt-5": { input_cost: 1.25, output_cost: 10 },
+    "gpt-5-mini": { input_cost: 0.25, output_cost: 2 },
+    "openai/gpt-5-mini": { input_cost: 0.25, output_cost: 2 },
+    "gpt-5-nano": { input_cost: 0.05, output_cost: 0.4 },
+    "openai/gpt-5-nano": { input_cost: 0.05, output_cost: 0.4 },
     "google/gemini-2.0-flash-001": { input_cost: 0.15, output_cost: 0.6 },
     "gemini-2.0-flash": { input_cost: 0.15, output_cost: 0.6 },
     "deepseek/deepseek-r1": { input_cost: 0.55, output_cost: 2.19 },
@@ -693,6 +739,11 @@ export async function generateCompletions({
             : {}),
         },
       },
+      ...(currentModel.modelId.startsWith("gpt-5")
+        ? {
+            temperature: 1,
+          }
+        : {}),
     } satisfies Parameters<typeof generateObject>[0];
 
     // const now = new Date().getTime();
@@ -879,6 +930,8 @@ export async function performLLMExtract(
 
     // let generationOptions = { ...originalOptions }; // Start with original options
 
+    const modelSelection = selectModelForSchema(jsonFormat.schema);
+
     const generationOptions: GenerateCompletionsOptions = {
       logger: meta.logger.child({
         method: "performLLMExtract/generateCompletions",
@@ -886,23 +939,8 @@ export async function performLLMExtract(
       options: jsonFormat,
       markdown: document.markdown,
       previousWarning: document.warning,
-      // ... existing model and provider options ...
-      // model: getModel("o3-mini", "openai"), // Keeping existing model selection
-      // model: getModel("o3-mini", "openai"),
-      // model: getModel("qwen-qwq-32b", "groq"),
-      // model: getModel("gemini-2.0-flash", "google"),
-      // model: getModel("gemini-2.5-pro-preview-03-25", "vertex"),
-      // model: getModel("gpt-4o-mini", "openai"),
-      // retryModel: getModel("gpt-4o", "openai"),
-      ...(process.env.VERTEX_CREDENTIALS
-        ? {
-            model: getModel("gemini-2.5-flash-lite", "vertex"),
-            retryModel: getModel("gpt-4o-mini", "openai"),
-          }
-        : {
-            model: getModel("gpt-4o-mini", "openai"),
-            retryModel: getModel("gpt-4o", "openai"),
-          }),
+      model: getModel(modelSelection.modelName, "openai"),
+      retryModel: getModel("gpt-4o", "openai"),
       costTrackingOptions: {
         costTracking: meta.costTracking,
         metadata: {
@@ -1050,6 +1088,29 @@ export async function performSummary(
       return document;
     }
 
+    if (document.markdown === undefined) {
+      document.warning =
+        "Summary mode is not supported without the markdown format." +
+        (document.warning ? " " + document.warning : "");
+      return document;
+    }
+
+    const trimOutput = trimToTokenLimit(
+      document.markdown!,
+      120000,
+      "gpt-4o-mini",
+      document.warning,
+    );
+
+    document.warning = trimOutput.warning;
+
+    if (!trimOutput.text || trimOutput.text.trim() === "") {
+      document.warning =
+        "Summary generation was skipped because the markdown content is empty." +
+        (document.warning ? " " + document.warning : "");
+      return document;
+    }
+
     const generationOptions: GenerateCompletionsOptions = {
       logger: meta.logger.child({
         method: "performSummary/generateCompletions",
@@ -1068,9 +1129,17 @@ export async function performSummary(
           required: ["summary"],
         },
       },
-      markdown: document.markdown,
+      markdown: trimOutput.text,
       previousWarning: document.warning,
-      model: getModel("gpt-4o-mini", "openai"),
+      model: (() => {
+        const inlineSchema = {
+          type: "object",
+          properties: { summary: { type: "string" } },
+          required: ["summary"],
+        };
+        const selection = selectModelForSchema(inlineSchema);
+        return getModel(selection.modelName, "openai");
+      })(),
       retryModel: getModel("gpt-4o", "openai"),
       costTrackingOptions: {
         costTracking: meta.costTracking,
@@ -1084,6 +1153,11 @@ export async function performSummary(
         functionId: "performSummary",
         scrapeId: meta.id,
       },
+      providerOptions: {
+        openai: {
+          reasoning: { effort: "minimal" },
+        },
+      } as any,
     };
 
     const { extract, warning, totalUsage, model } =

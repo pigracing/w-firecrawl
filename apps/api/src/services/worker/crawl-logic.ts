@@ -21,37 +21,47 @@ import { logJob } from "../logging/log_job";
 import { createWebhookSender, WebhookEvent } from "../webhook";
 import { hasFormatOfType } from "../../lib/format-utils";
 import type { NuQJob } from "./nuq";
+import { ScrapeJobData } from "../../types";
 
-export async function finishCrawlIfNeeded(job: NuQJob<any>, sc: StoredCrawl) {
+export async function finishCrawlIfNeeded(
+  job: NuQJob<ScrapeJobData>,
+  sc: StoredCrawl,
+) {
+  const crawlId = job.data.crawl_id!;
+
+  if (!crawlId) {
+    return;
+  }
+
   const logger = _logger.child({
     module: "queue-worker",
     method: "finishCrawlIfNeeded",
     jobId: job.id,
     scrapeId: job.id,
-    crawlId: job.data.crawl_id,
+    crawlId,
     zeroDataRetention: sc.internalOptions.zeroDataRetention,
   });
 
-  if (await finishCrawlPre(job.data.crawl_id, logger)) {
+  if (await finishCrawlPre(crawlId, logger)) {
     logger.info("Crawl is pre-finished, checking if we need to add more jobs");
     if (
-      job.data.crawlerOptions &&
+      sc.crawlerOptions &&
       !(await redisEvictConnection.exists(
-        "crawl:" + job.data.crawl_id + ":invisible_urls",
+        "crawl:" + crawlId + ":invisible_urls",
       ))
     ) {
       await redisEvictConnection.set(
-        "crawl:" + job.data.crawl_id + ":invisible_urls",
+        "crawl:" + crawlId + ":invisible_urls",
         "done",
         "EX",
         60 * 60 * 24,
       );
 
-      const sc = (await getCrawl(job.data.crawl_id))!;
+      const sc = (await getCrawl(crawlId))!;
 
       const visitedUrls = new Set(
         await redisEvictConnection.smembers(
-          "crawl:" + job.data.crawl_id + ":visited_unique",
+          "crawl:" + crawlId + ":visited_unique",
         ),
       );
 
@@ -82,11 +92,11 @@ export async function finishCrawlIfNeeded(job: NuQJob<any>, sc: StoredCrawl) {
       });
 
       const crawler = crawlToCrawler(
-        job.data.crawl_id,
+        crawlId,
         sc,
-        (await getACUCTeam(job.data.team_id))?.flags ?? null,
+        (await getACUCTeam(job.data.team_id!))?.flags ?? null,
         sc.originUrl!,
-        job.data.crawlerOptions,
+        sc.crawlerOptions,
       );
 
       const univistedUrls = await crawler.filterLinks(
@@ -98,8 +108,7 @@ export async function finishCrawlIfNeeded(job: NuQJob<any>, sc: StoredCrawl) {
       const addableJobCount =
         sc.crawlerOptions.limit === undefined
           ? Infinity
-          : sc.crawlerOptions.limit -
-            (await getDoneJobsOrderedLength(job.data.crawl_id));
+          : sc.crawlerOptions.limit - (await getDoneJobsOrderedLength(crawlId));
 
       if (univistedUrls.links.length !== 0 && addableJobCount > 0) {
         logger.info("Adding jobs", {
@@ -116,14 +125,14 @@ export async function finishCrawlIfNeeded(job: NuQJob<any>, sc: StoredCrawl) {
               mode: "single_urls" as const,
               team_id: job.data.team_id,
               crawlerOptions: {
-                ...job.data.crawlerOptions,
+                ...sc.crawlerOptions,
                 urlInvisibleInCurrentCrawl: true,
               },
-              scrapeOptions: job.data.scrapeOptions,
+              scrapeOptions: sc.scrapeOptions,
               internalOptions: sc.internalOptions,
               origin: job.data.origin,
               integration: job.data.integration,
-              crawl_id: job.data.crawl_id,
+              crawl_id: crawlId,
               sitemapped: true,
               webhook: job.data.webhook,
               v1: job.data.v1,
@@ -135,7 +144,7 @@ export async function finishCrawlIfNeeded(job: NuQJob<any>, sc: StoredCrawl) {
         });
 
         const lockedIds = await lockURLsIndividually(
-          job.data.crawl_id,
+          crawlId,
           sc,
           jobs.map(x => ({ id: x.jobId, url: x.data.url })),
         );
@@ -143,7 +152,7 @@ export async function finishCrawlIfNeeded(job: NuQJob<any>, sc: StoredCrawl) {
           lockedIds.find(y => y.id === x.jobId),
         );
         await addCrawlJobs(
-          job.data.crawl_id,
+          crawlId,
           lockedJobs.map(x => x.jobId),
           logger,
         );
@@ -154,7 +163,7 @@ export async function finishCrawlIfNeeded(job: NuQJob<any>, sc: StoredCrawl) {
             lockedJobs: lockedJobs.length,
           });
 
-          await unPreFinishCrawl(job.data.crawl_id);
+          await unPreFinishCrawl(crawlId);
           return;
         } else {
           logger.info(
@@ -165,10 +174,10 @@ export async function finishCrawlIfNeeded(job: NuQJob<any>, sc: StoredCrawl) {
     }
 
     logger.info("Finishing crawl");
-    await finishCrawl(job.data.crawl_id, logger);
+    await finishCrawl(crawlId, logger);
 
     if (!job.data.v1) {
-      const jobIDs = await getCrawlJobs(job.data.crawl_id);
+      const jobIDs = await getCrawlJobs(crawlId);
 
       const jobs = (await getJobs(jobIDs)).sort(
         (a, b) => a.timestamp - b.timestamp,
@@ -190,44 +199,30 @@ export async function finishCrawlIfNeeded(job: NuQJob<any>, sc: StoredCrawl) {
 
       await logJob(
         {
-          job_id: job.data.crawl_id,
+          job_id: crawlId,
           success: jobStatus === "completed",
           message: sc.cancelled ? "Cancelled" : undefined,
           num_docs: fullDocs.length,
           docs: [],
           time_taken: (Date.now() - sc.createdAt) / 1000,
           team_id: job.data.team_id,
-          mode: job.data.crawlerOptions !== null ? "crawl" : "batch_scrape",
+          mode: sc.crawlerOptions !== null ? "crawl" : "batch_scrape",
           url: sc.originUrl!,
           scrapeOptions: sc.scrapeOptions,
           crawlerOptions: sc.crawlerOptions,
-          origin: job.data.origin,
+          origin: sc.originUrl!,
           integration: job.data.integration,
           zeroDataRetention: job.data.zeroDataRetention,
         },
         false,
-        job.data.internalOptions?.bypassBilling ?? false,
+        sc.internalOptions?.bypassBilling ?? false,
       );
-
-      const data = {
-        success: jobStatus !== "failed",
-        result: {
-          links: fullDocs.map(doc => {
-            return {
-              content: doc,
-              source: doc?.metadata?.sourceURL ?? doc?.url ?? "",
-            };
-          }),
-        },
-        project_id: job.data.project_id,
-        docs: fullDocs,
-      };
 
       // v0 web hooks, call when done with all the data
       if (!job.data.v1) {
         const sender = await createWebhookSender({
           teamId: job.data.team_id,
-          jobId: job.data.crawl_id,
+          jobId: crawlId,
           webhook: job.data.webhook,
           v0: true,
         });
@@ -240,7 +235,7 @@ export async function finishCrawlIfNeeded(job: NuQJob<any>, sc: StoredCrawl) {
             },
             source: doc?.metadata?.sourceURL ?? doc?.url ?? "",
           }));
-          if (job.data.crawlerOptions !== null) {
+          if (sc.crawlerOptions !== null) {
             sender.send(WebhookEvent.CRAWL_COMPLETED, {
               success: true,
               data: documents,
@@ -254,7 +249,7 @@ export async function finishCrawlIfNeeded(job: NuQJob<any>, sc: StoredCrawl) {
         }
       }
     } else {
-      const num_docs = await getDoneJobsOrderedLength(job.data.crawl_id);
+      const num_docs = await getDoneJobsOrderedLength(crawlId);
       const jobStatus = sc.cancelled ? "failed" : "completed";
 
       let credits_billed = null;
@@ -263,7 +258,7 @@ export async function finishCrawlIfNeeded(job: NuQJob<any>, sc: StoredCrawl) {
         const creditsRpc = await supabase_service.rpc(
           "credits_billed_by_crawl_id_1",
           {
-            i_crawl_id: job.data.crawl_id,
+            i_crawl_id: crawlId,
           },
         );
 
@@ -278,18 +273,18 @@ export async function finishCrawlIfNeeded(job: NuQJob<any>, sc: StoredCrawl) {
 
       await logJob(
         {
-          job_id: job.data.crawl_id,
+          job_id: crawlId,
           success: jobStatus === "completed",
           message: sc.cancelled ? "Cancelled" : undefined,
           num_docs,
           docs: [],
           time_taken: (Date.now() - sc.createdAt) / 1000,
-          team_id: job.data.team_id,
+          team_id: sc.team_id,
           scrapeOptions: sc.scrapeOptions,
-          mode: job.data.crawlerOptions !== null ? "crawl" : "batch_scrape",
+          mode: sc.crawlerOptions !== null ? "crawl" : "batch_scrape",
           url:
             sc?.originUrl ??
-            (job.data.crawlerOptions === null ? "Batch Scrape" : "Unknown"),
+            (sc.crawlerOptions === null ? "Batch Scrape" : "Unknown"),
           crawlerOptions: sc.crawlerOptions,
           origin: job.data.origin,
           integration: job.data.integration,
@@ -297,19 +292,19 @@ export async function finishCrawlIfNeeded(job: NuQJob<any>, sc: StoredCrawl) {
           zeroDataRetention: job.data.zeroDataRetention,
         },
         true,
-        job.data.internalOptions?.bypassBilling ?? false,
+        sc.internalOptions?.bypassBilling ?? false,
       );
 
       // v1 web hooks, call when done with no data, but with event completed
       if (job.data.v1 && job.data.webhook) {
         const sender = await createWebhookSender({
           teamId: job.data.team_id,
-          jobId: job.data.crawl_id,
+          jobId: crawlId,
           webhook: job.data.webhook,
           v0: false,
         });
         if (sender) {
-          if (job.data.crawlerOptions !== null) {
+          if (sc.crawlerOptions !== null) {
             sender.send(WebhookEvent.CRAWL_COMPLETED, {
               success: true,
               data: [],

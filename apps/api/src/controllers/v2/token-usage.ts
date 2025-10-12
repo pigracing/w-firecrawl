@@ -1,7 +1,6 @@
 import { Response } from "express";
 import { ErrorResponse, RequestWithAuth } from "./types";
-import { getACUC, getACUCTeam } from "../auth";
-import { logger } from "../../lib/logger";
+import { getACUCTeam } from "../auth";
 import { RateLimiterMode } from "../../types";
 
 interface TokenUsageResponse {

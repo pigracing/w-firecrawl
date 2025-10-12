@@ -11,7 +11,6 @@ import {
 import { v4 as uuidv4 } from "uuid";
 import { addScrapeJob, waitForJob } from "../../services/queue-jobs";
 import { logJob } from "../../services/logging/log_job";
-import { Mode } from "../../types";
 import { search } from "../../search";
 import { isUrlBlocked } from "../../scraper/WebScraper/utils/blocklist";
 import * as Sentry from "@sentry/node";
@@ -69,7 +68,7 @@ async function scrapeX402SearchResult(
     await addScrapeJob(
       {
         url: searchResult.url,
-        mode: "single_urls" as Mode,
+        mode: "single_urls",
         team_id: options.teamId,
         scrapeOptions: {
           ...scrapeOptions,
@@ -96,6 +95,7 @@ async function scrapeX402SearchResult(
         basePriority: 10,
       }),
       directToBullMQ,
+      true,
     );
 
     const doc: Document = await waitForJob(
@@ -110,7 +110,7 @@ async function scrapeX402SearchResult(
       teamId: options.teamId,
       origin: options.origin,
     });
-    await scrapeQueue.removeJob(jobId);
+    await scrapeQueue.removeJob(jobId, logger);
 
     const document = {
       title: searchResult.title,

@@ -33,6 +33,9 @@ importers:
       '@supabase/supabase-js':
         specifier: ^2.43.1
         version: 2.44.2
+      axios:
+        specifier: ^1.12.2
+        version: 1.12.2(debug@4.3.4)
       dotenv:
         specifier: ^16.4.5
         version: 16.4.5
@@ -1966,8 +1969,8 @@ packages:
     resolution: {integrity: sha512-VTijN8+pKrf4sfM2t+ISXjypJ+k3AiP6OMzyLoWJ7jfMBtBfWbQc1rN07OndNb0CZRBBukOHoBhYDPuyae+/1Q==}
     engines: {node: '>= 10.0.0'}
 
-  axios@1.11.0:
-    resolution: {integrity: sha512-1Lx3WLFQWm3ooKDYZD1eXmoGO9fxYQjrycfHFC8P0sCfQVXyROp0p9PFWBehewBOdCwHc+f/b8I0fMto5eSfwA==}
+  axios@1.12.2:
+    resolution: {integrity: sha512-vMJzPewAlRyOgxV2dU0Cuz2O8zzzx9VYtbJOaBgXFeLc4IV/Eg50n4LowmehOOR61S8ZMpc2K5Sa7g6A4jfkUw==}
 
   babel-jest@30.0.5:
     resolution: {integrity: sha512-mRijnKimhGDMsizTvBTWotwNpzrkHr+VvZUQBof2AufXKB8NXrL1W69TG20EvOz7aevx6FTJIaBuBkYxS8zolg==}
@@ -7703,7 +7706,7 @@ snapshots:
       uuid: 8.0.0
       xml2js: 0.6.2
 
-  axios@1.11.0(debug@4.3.4):
+  axios@1.12.2(debug@4.3.4):
     dependencies:
       follow-redirects: 1.15.6(debug@4.3.4)
       form-data: 4.0.4
@@ -8665,7 +8668,7 @@ snapshots:
 
   has-tostringtag@1.0.2:
     dependencies:
-      has-symbols: 1.0.3
+      has-symbols: 1.1.0
 
   hasown@2.0.2:
     dependencies:
@@ -9853,7 +9856,7 @@ snapshots:
 
   posthog-node@4.18.0(debug@4.3.4):
     dependencies:
-      axios: 1.11.0(debug@4.3.4)
+      axios: 1.12.2(debug@4.3.4)
     transitivePeerDependencies:
       - debug
 

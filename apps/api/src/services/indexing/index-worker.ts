@@ -23,6 +23,9 @@ import {
   processOMCEJobs,
   processDomainFrequencyJobs,
 } from "..";
+import { getSearchIndexClient } from "../../lib/search-index-client";
+// Search indexing is now handled by the separate search service
+// import { processSearchIndexJobs } from "../../lib/search-index/queue";
 import { processWebhookInsertJobs } from "../webhook";
 import {
   scrapeOptions as scrapeOptionsSchema,
@@ -32,6 +35,7 @@ import {
 import { StoredCrawl, crawlToCrawler, saveCrawl } from "../../lib/crawl-redis";
 import { _addScrapeJobToBullMQ } from "../queue-jobs";
 import { BullMQOtel } from "bullmq-otel";
+import { withSpan, setSpanAttributes } from "../../lib/otel-tracer";
 
 const workerLockDuration = Number(process.env.WORKER_LOCK_DURATION) || 60000;
 const workerStalledCheckInterval =
@@ -190,10 +194,10 @@ const processPrecrawlJobInternal = async (token: string, job: Job) => {
           sc.robots = await crawler.getRobotsTxt(
             scrapeOptions.skipTlsVerification,
           );
-          const robotsCrawlDelay = crawler.getRobotsCrawlDelay();
-          if (robotsCrawlDelay !== null && !sc.crawlerOptions.delay) {
-            sc.crawlerOptions.delay = robotsCrawlDelay;
-          }
+          // const robotsCrawlDelay = crawler.getRobotsCrawlDelay();
+          // if (robotsCrawlDelay !== null && !sc.crawlerOptions.delay) {
+          //   sc.crawlerOptions.delay = robotsCrawlDelay;
+          // }
         } catch (e) {
           logger.debug("Failed to get robots.txt (this is probably fine!)", {
             error: e,
@@ -330,6 +334,8 @@ const INDEX_INSERT_INTERVAL = 3000;
 const WEBHOOK_INSERT_INTERVAL = 15000;
 const OMCE_INSERT_INTERVAL = 5000;
 const DOMAIN_FREQUENCY_INTERVAL = 10000;
+// Search indexing is now handled by separate search service, not this worker
+// const SEARCH_INDEX_INTERVAL = 10000;
 
 // Start the workers
 (async () => {
@@ -350,7 +356,13 @@ const DOMAIN_FREQUENCY_INTERVAL = 10000;
       return;
     }
 
-    await processIndexInsertJobs();
+    await withSpan("firecrawl-index-worker-process-insert-jobs", async span => {
+      setSpanAttributes(span, {
+        "index.worker.operation": "process_insert_jobs",
+        "index.worker.type": "scheduled",
+      });
+      await processIndexInsertJobs();
+    });
   }, INDEX_INSERT_INTERVAL);
 
   const webhookInserterInterval = setInterval(async () => {
@@ -364,22 +376,64 @@ const DOMAIN_FREQUENCY_INTERVAL = 10000;
     if (isShuttingDown) {
       return;
     }
-    await processIndexRFInsertJobs();
+    await withSpan(
+      "firecrawl-index-worker-process-rf-insert-jobs",
+      async span => {
+        setSpanAttributes(span, {
+          "index.worker.operation": "process_rf_insert_jobs",
+          "index.worker.type": "scheduled",
+        });
+        await processIndexRFInsertJobs();
+      },
+    );
   }, INDEX_INSERT_INTERVAL);
 
   const omceInserterInterval = setInterval(async () => {
     if (isShuttingDown) {
       return;
     }
-    await processOMCEJobs();
+    await withSpan("firecrawl-index-worker-process-omce-jobs", async span => {
+      setSpanAttributes(span, {
+        "index.worker.operation": "process_omce_jobs",
+        "index.worker.type": "scheduled",
+      });
+      await processOMCEJobs();
+    });
   }, OMCE_INSERT_INTERVAL);
 
   const domainFrequencyInterval = setInterval(async () => {
     if (isShuttingDown) {
       return;
     }
-    await processDomainFrequencyJobs();
+    await withSpan(
+      "firecrawl-index-worker-process-domain-frequency-jobs",
+      async span => {
+        setSpanAttributes(span, {
+          "index.worker.operation": "process_domain_frequency_jobs",
+          "index.worker.type": "scheduled",
+        });
+        await processDomainFrequencyJobs();
+      },
+    );
   }, DOMAIN_FREQUENCY_INTERVAL);
+
+  // Search indexing is now handled by separate search service
+  // The search service has its own worker that processes the queue
+  // This worker no longer needs to process search index jobs
+  
+  // Health check for search service (optional)
+  const searchClient = getSearchIndexClient();
+  if (searchClient) {
+    searchClient.health().then(healthy => {
+      if (healthy) {
+        logger.info("Search service is healthy");
+      } else {
+        logger.warn("Search service health check failed");
+      }
+    }).catch(error => {
+      logger.error("Search service health check error", { error });
+    });
+  }
 
   // Wait for all workers to complete (which should only happen on shutdown)
   await Promise.all([billingWorkerPromise, precrawlWorkerPromise]);

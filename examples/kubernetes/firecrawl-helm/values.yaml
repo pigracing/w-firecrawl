@@ -1,5 +1,34 @@
 replicaCount: 1
 
+nuqWorker:
+  replicaCount: 5
+  resources:
+    requests:
+      memory: "3G"
+      cpu: "1000m"
+    limits:
+      memory: "4G"
+      cpu: "1000m"
+
+nuqPostgres:
+  replicaCount: 1
+  image:
+    repository: ghcr.io/firecrawl/nuq-postgres
+    tag: latest
+    pullPolicy: Always
+  auth:
+    username: postgres
+    database: postgres
+  resources:
+    requests:
+      memory: "512Mi"
+      cpu: "250m"
+    limits:
+      memory: "1Gi"
+      cpu: "500m"
+  persistence:
+    enabled: false
+
 image:
   repository: ghcr.io/firecrawl/firecrawl
   tag: "latest"
@@ -35,6 +64,7 @@ config:
   PLAYWRIGHT_MICROSERVICE_URL: "http://playwright-service:3000"
   USE_DB_AUTHENTICATION: "false"
   HDX_NODE_BETA_MODE: "1"
+  NUQ_DATABASE_URL: "postgresql://postgres:password@nuq-postgres:5432/postgres"
 
 playwrightConfig:
   PORT: "3000"

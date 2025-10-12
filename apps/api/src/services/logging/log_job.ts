@@ -5,21 +5,13 @@ import "dotenv/config";
 import { logger as _logger } from "../../lib/logger";
 import { configDotenv } from "dotenv";
 import { saveJobToGCS } from "../../lib/gcs-jobs";
+import { saveJobToBigQuery } from "../../lib/bigquery-jobs";
+import {
+  transformJobForLogging,
+  createJobLoggerContext,
+} from "../../lib/job-transform";
+import { withSpan, setSpanAttributes } from "../../lib/otel-tracer";
 configDotenv();
-
-function cleanOfNull<T>(x: T): T {
-  if (Array.isArray(x)) {
-    return x.map(x => cleanOfNull(x)) as T;
-  } else if (typeof x === "object" && x !== null) {
-    return Object.fromEntries(
-      Object.entries(x).map(([k, v]) => [k, cleanOfNull(v)]),
-    ) as T;
-  } else if (typeof x === "string") {
-    return x.replaceAll("\u0000", "") as T;
-  } else {
-    return x;
-  }
-}
 
 export async function logJob(
   job: FirecrawlJob,
@@ -29,23 +21,7 @@ export async function logJob(
   let logger = _logger.child({
     module: "log_job",
     method: "logJob",
-    ...(job.mode === "scrape" ||
-    job.mode === "single_urls" ||
-    job.mode === "single_url"
-      ? {
-          scrapeId: job.job_id,
-        }
-      : {}),
-    ...(job.mode === "crawl" || job.mode === "batch_scrape"
-      ? {
-          crawlId: job.job_id,
-        }
-      : {}),
-    ...(job.mode === "extract"
-      ? {
-          extractId: job.job_id,
-        }
-      : {}),
+    ...createJobLoggerContext(job),
   });
 
   const zeroDataRetention = job.zeroDataRetention ?? false;
@@ -55,8 +31,31 @@ export async function logJob(
   });
 
   try {
+    // Save to GCS if configured
     if (process.env.GCS_BUCKET_NAME) {
-      await saveJobToGCS(job);
+      await withSpan("firecrawl-log-job-save-to-gcs", async span => {
+        setSpanAttributes(span, {
+          "log_job.operation": "save_to_gcs",
+          "job.id": job.job_id,
+          "job.team_id": job.team_id,
+        });
+        await saveJobToGCS(job);
+      });
+    }
+
+    // Save to BigQuery if configured
+    if (process.env.BIGQUERY_DATASET_ID) {
+      withSpan("firecrawl-log-job-save-to-bigquery", async span => {
+        setSpanAttributes(span, {
+          "log_job.operation": "save_to_bigquery",
+          "job.id": job.job_id,
+          "job.team_id": job.team_id,
+          "job.force": force,
+        });
+        await saveJobToBigQuery(job, force);
+      }).catch(error => {
+        logger.error("Error saving job to BigQuery", { error });
+      });
     }
 
     const useDbAuthentication = process.env.USE_DB_AUTHENTICATION === "true";
@@ -79,132 +78,125 @@ export async function logJob(
     //     },
     //   ];
     // }
-    const jobColumn = {
-      job_id: job.job_id ? job.job_id : null,
-      success: job.success,
-      message: zeroDataRetention ? null : job.message,
-      num_docs: job.num_docs,
-      docs: zeroDataRetention
-        ? null
-        : (job.mode === "single_urls" || job.mode === "scrape") &&
-            process.env.GCS_BUCKET_NAME
-          ? null
-          : cleanOfNull(job.docs),
-      time_taken: job.time_taken,
-      team_id:
-        job.team_id === "preview" || job.team_id?.startsWith("preview_")
-          ? null
-          : job.team_id,
-      mode: job.mode,
-      url: zeroDataRetention
-        ? "<redacted due to zero data retention>"
-        : job.url,
-      crawler_options: zeroDataRetention ? null : job.crawlerOptions,
-      page_options: zeroDataRetention ? null : job.scrapeOptions,
-      origin: zeroDataRetention ? null : job.origin,
-      integration: zeroDataRetention ? null : (job.integration ?? null),
-      num_tokens: job.num_tokens,
-      retry: !!job.retry,
-      crawl_id: job.crawl_id,
-      tokens_billed: job.tokens_billed,
-      is_migrated: true,
-      cost_tracking: zeroDataRetention ? null : job.cost_tracking,
-      pdf_num_pages: zeroDataRetention ? null : (job.pdf_num_pages ?? null),
-      credits_billed: job.credits_billed ?? null,
-      change_tracking_tag: zeroDataRetention
-        ? null
-        : (job.change_tracking_tag ?? null),
-      dr_clean_by:
-        zeroDataRetention && job.crawl_id
-          ? new Date(Date.now() + 1000 * 60 * 60 * 24).toISOString()
-          : null,
-    };
+    const jobColumn = transformJobForLogging(job, {
+      includeTimestamp: false,
+      serializeObjects: false,
+      cleanNullValues: true,
+    });
 
     if (bypassLogging) {
       return;
     }
 
     if (force) {
-      let i = 0,
-        done = false;
-      while (i++ <= 10) {
-        try {
-          const { error } = await supabase_service
-            .from("firecrawl_jobs")
-            .insert([jobColumn]);
-          if (error) {
+      await withSpan("firecrawl-log-job-supabase-force-insert", async span => {
+        setSpanAttributes(span, {
+          "log_job.operation": "supabase_force_insert",
+          "job.id": job.job_id,
+          "job.team_id": job.team_id,
+          "job.force": true,
+        });
+
+        let i = 0,
+          done = false;
+        while (i++ <= 10) {
+          try {
+            const { error } = await supabase_service
+              .from("firecrawl_jobs")
+              .insert([jobColumn]);
+            if (error) {
+              logger.error(
+                "Failed to log job due to Supabase error -- trying again",
+                { error },
+              );
+              await new Promise<void>(resolve =>
+                setTimeout(() => resolve(), 75),
+              );
+            } else {
+              done = true;
+              break;
+            }
+          } catch (error) {
             logger.error(
-              "Failed to log job due to Supabase error -- trying again",
+              "Failed to log job due to thrown error -- trying again",
               { error },
             );
             await new Promise<void>(resolve => setTimeout(() => resolve(), 75));
-          } else {
-            done = true;
-            break;
           }
-        } catch (error) {
-          logger.error(
-            "Failed to log job due to thrown error -- trying again",
-            { error },
-          );
-          await new Promise<void>(resolve => setTimeout(() => resolve(), 75));
         }
-      }
-      if (done) {
-        logger.debug("Job logged successfully!");
-      } else {
-        logger.error("Failed to log job!");
-      }
+
+        setSpanAttributes(span, { "supabase.insert_successful": done });
+        if (done) {
+          logger.debug("Job logged successfully!");
+        } else {
+          logger.error("Failed to log job!");
+        }
+      });
     } else {
-      const { error } = await supabase_service
-        .from("firecrawl_jobs")
-        .insert([jobColumn]);
-      if (error) {
-        logger.error(`Error logging job`, {
-          error,
+      await withSpan("firecrawl-log-job-supabase-insert", async span => {
+        setSpanAttributes(span, {
+          "log_job.operation": "supabase_insert",
+          "job.id": job.job_id,
+          "job.team_id": job.team_id,
+          "job.force": false,
         });
-      } else {
-        logger.debug("Job logged successfully!");
-      }
+
+        const { error } = await supabase_service
+          .from("firecrawl_jobs")
+          .insert([jobColumn]);
+
+        if (error) {
+          setSpanAttributes(span, { "supabase.insert_successful": false });
+          logger.error(`Error logging job`, {
+            error,
+          });
+          throw error;
+        } else {
+          setSpanAttributes(span, { "supabase.insert_successful": true });
+          logger.debug("Job logged successfully!");
+        }
+      });
     }
 
     if (process.env.POSTHOG_API_KEY && !job.crawl_id) {
-      let phLog = {
-        distinctId: "from-api", //* To identify this on the group level, setting distinctid to a static string per posthog docs: https://posthog.com/docs/product-analytics/group-analytics#advanced-server-side-only-capturing-group-events-without-a-user
-        ...(job.team_id !== "preview" &&
-          !job.team_id?.startsWith("preview_") && {
-            groups: { team: job.team_id },
-          }), //* Identifying event on this team
-        event: "job-logged",
-        properties: {
-          success: job.success,
-          message: zeroDataRetention ? null : job.message,
-          num_docs: job.num_docs,
-          time_taken: job.time_taken,
-          team_id:
-            job.team_id === "preview" || job.team_id?.startsWith("preview_")
-              ? null
-              : job.team_id,
-          mode: job.mode,
-          url: zeroDataRetention
-            ? "<redacted due to zero data retention>"
-            : job.url,
-          crawler_options: zeroDataRetention ? null : job.crawlerOptions,
-          page_options: zeroDataRetention ? null : job.scrapeOptions,
-          origin: zeroDataRetention ? null : job.origin,
-          num_tokens: job.num_tokens,
-          retry: job.retry,
-          tokens_billed: job.tokens_billed,
-          cost_tracking: zeroDataRetention ? null : job.cost_tracking,
-          pdf_num_pages: zeroDataRetention ? null : job.pdf_num_pages,
-          change_tracking_tag: zeroDataRetention
-            ? null
-            : (job.change_tracking_tag ?? null),
-        },
-      };
-      if (job.mode !== "single_urls") {
-        posthog.capture(phLog);
-      }
+      await withSpan("firecrawl-log-job-posthog-capture", async span => {
+        setSpanAttributes(span, {
+          "log_job.operation": "posthog_capture",
+          "job.id": job.job_id,
+          "job.team_id": job.team_id,
+          "job.mode": job.mode,
+        });
+
+        const jobProperties = transformJobForLogging(job, {
+          includeTimestamp: false,
+          serializeObjects: false,
+          cleanNullValues: false,
+        });
+
+        let phLog = {
+          distinctId: "from-api", //* To identify this on the group level, setting distinctid to a static string per posthog docs: https://posthog.com/docs/product-analytics/group-analytics#advanced-server-side-only-capturing-group-events-without-a-user
+          ...(job.team_id !== "preview" &&
+            !job.team_id?.startsWith("preview_") && {
+              groups: { team: job.team_id },
+            }), //* Identifying event on this team
+          event: "job-logged",
+          properties: {
+            ...jobProperties,
+            // Remove docs from PostHog as it's not needed for analytics
+            docs: undefined,
+          },
+        };
+
+        if (job.mode !== "single_urls") {
+          posthog.capture(phLog);
+          setSpanAttributes(span, { "posthog.capture_sent": true });
+        } else {
+          setSpanAttributes(span, {
+            "posthog.capture_sent": false,
+            "posthog.skip_reason": "single_urls_mode",
+          });
+        }
+      });
     }
   } catch (error) {
     logger.error(`Error logging job`, {

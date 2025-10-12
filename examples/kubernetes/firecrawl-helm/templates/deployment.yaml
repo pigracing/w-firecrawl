@@ -22,7 +22,7 @@ spec:
         - name: api
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
-          args: [ "pnpm", "run", "start:production" ]
+          args: [ "pnpm", "run", "start" ]
           ports:
             - containerPort: {{ .Values.service.api.port }}
           env:

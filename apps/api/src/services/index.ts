@@ -9,6 +9,7 @@ import psl from "psl";
 import { MapDocument } from "../controllers/v2/types";
 import { PdfMetadata } from "@mendable/firecrawl-rs";
 import { storage } from "../lib/gcs-jobs";
+import { withSpan, setSpanAttributes } from "../lib/otel-tracer";
 configDotenv();
 
 // SupabaseService class initializes the Supabase client conditionally based on environment variables.
@@ -64,71 +65,77 @@ export async function getIndexFromGCS(
   url: string,
   logger?: Logger,
 ): Promise<any | null> {
-  //   logger.info(`Getting f-engine document from GCS`, {
-  //     url,
-  //   });
   try {
-    if (!process.env.GCS_INDEX_BUCKET_NAME) {
-      return null;
-    }
-
-    const bucket = storage.bucket(process.env.GCS_INDEX_BUCKET_NAME);
-    const blob = bucket.file(`${url}`);
-    const [blobContent] = await blob.download();
-    const parsed = JSON.parse(blobContent.toString());
-
-    try {
-      if (typeof parsed.screenshot === "string") {
-        const screenshotUrl = new URL(parsed.screenshot);
-        let expiresAt =
-          parseInt(screenshotUrl.searchParams.get("Expires") ?? "0", 10) * 1000;
-        if (expiresAt === 0) {
-          expiresAt =
-            new Date(
-              screenshotUrl.searchParams.get("X-Goog-Date") ??
-                "1970-01-01T00:00:00Z",
-            ).getTime() +
-            parseInt(
-              screenshotUrl.searchParams.get("X-Goog-Expires") ?? "0",
-              10,
-            ) *
-              1000;
-        }
-        if (
-          screenshotUrl.hostname === "storage.googleapis.com" &&
-          expiresAt < Date.now()
-        ) {
-          logger?.info("Re-signing screenshot URL");
-          const [url] = await storage
-            .bucket(process.env.GCS_MEDIA_BUCKET_NAME!)
-            .file(decodeURIComponent(screenshotUrl.pathname.split("/")[2]))
-            .getSignedUrl({
-              action: "read",
-              expires: Date.now() + 1000 * 60 * 60 * 24 * 7, // 7 days
-            });
-          parsed.screenshot = url;
-
-          // Update the blob
-          await blob.save(JSON.stringify(parsed), {
-            contentType: "application/json",
-          });
-        }
-      }
-    } catch (error) {
-      logger?.warn("Error re-signing screenshot URL", {
-        error,
-        url,
+    return await withSpan("firecrawl-index-get-from-gcs", async span => {
+      setSpanAttributes(span, {
+        "index.operation": "get_from_gcs",
+        "index.url": url,
       });
-    }
 
-    return parsed;
+      if (!process.env.GCS_INDEX_BUCKET_NAME) {
+        setSpanAttributes(span, { "gcs.index_bucket_configured": false });
+        return null;
+      }
+
+      const bucket = storage.bucket(process.env.GCS_INDEX_BUCKET_NAME);
+      const blob = bucket.file(`${url}`);
+      const [blobContent] = await blob.download();
+      const parsed = JSON.parse(blobContent.toString());
+
+      try {
+        if (typeof parsed.screenshot === "string") {
+          const screenshotUrl = new URL(parsed.screenshot);
+          let expiresAt =
+            parseInt(screenshotUrl.searchParams.get("Expires") ?? "0", 10) *
+            1000;
+          if (expiresAt === 0) {
+            expiresAt =
+              new Date(
+                screenshotUrl.searchParams.get("X-Goog-Date") ??
+                  "1970-01-01T00:00:00Z",
+              ).getTime() +
+              parseInt(
+                screenshotUrl.searchParams.get("X-Goog-Expires") ?? "0",
+                10,
+              ) *
+                1000;
+          }
+          if (
+            screenshotUrl.hostname === "storage.googleapis.com" &&
+            expiresAt < Date.now()
+          ) {
+            logger?.info("Re-signing screenshot URL");
+            const [url] = await storage
+              .bucket(process.env.GCS_MEDIA_BUCKET_NAME!)
+              .file(decodeURIComponent(screenshotUrl.pathname.split("/")[2]))
+              .getSignedUrl({
+                action: "read",
+                expires: Date.now() + 1000 * 60 * 60 * 24 * 7, // 7 days
+              });
+            parsed.screenshot = url;
+
+            // Update the blob
+            await blob.save(JSON.stringify(parsed), {
+              contentType: "application/json",
+            });
+          }
+        }
+      } catch (error) {
+        logger?.warn("Error re-signing screenshot URL", {
+          error,
+          url,
+        });
+      }
+
+      setSpanAttributes(span, { "index.document_found": true });
+      return parsed;
+    });
   } catch (error) {
     if (
       error instanceof ApiError &&
       error.code === 404 &&
       error.message.includes("No such object:")
     ) {
-      // Object does not exist
       return null;
     }
 
@@ -150,20 +157,32 @@ export async function saveIndexToGCS(
     screenshot?: string;
     pdfMetadata?: PdfMetadata;
     contentType?: string;
+    postprocessorsUsed?: string[];
   },
 ): Promise<void> {
-  try {
+  return await withSpan("firecrawl-index-save-to-gcs", async span => {
+    setSpanAttributes(span, {
+      "index.operation": "save_to_gcs",
+      "index.id": id,
+      "index.url": doc.url,
+      "index.status_code": doc.statusCode,
+      "index.has_error": !!doc.error,
+    });
+
     if (!process.env.GCS_INDEX_BUCKET_NAME) {
+      setSpanAttributes(span, { "gcs.index_bucket_configured": false });
       return;
     }
 
     const bucket = storage.bucket(process.env.GCS_INDEX_BUCKET_NAME);
     const blob = bucket.file(`${id}.json`);
+
     for (let i = 0; i < 3; i++) {
       try {
         await blob.save(JSON.stringify(doc), {
           contentType: "application/json",
         });
+        setSpanAttributes(span, { "index.save_successful": true });
         break;
       } catch (error) {
         if (i === 2) {
@@ -177,16 +196,16 @@ export async function saveIndexToGCS(
         }
       }
     }
-  } catch (error) {
-    throw new Error("Error saving index document to GCS", {
-      cause: error,
-    });
-  }
+  });
 }
 
 export const useIndex =
   process.env.INDEX_SUPABASE_URL !== "" &&
   process.env.INDEX_SUPABASE_URL !== undefined;
+
+export const useSearchIndex =
+  process.env.SEARCH_INDEX_SUPABASE_URL !== "" &&
+  process.env.SEARCH_INDEX_SUPABASE_URL !== undefined;
 
 export function normalizeURLForIndex(url: string): string {
   const urlObj = new URL(url);
@@ -790,9 +809,10 @@ export async function queryIndexAtSplitLevelWithMeta(
   while (true) {
     // Query the index for the next set of links
     const { data: _data, error } = await index_supabase_service
-      .rpc("query_index_at_split_level_with_meta_2", {
+      .rpc("query_index_at_split_level_with_meta", {
         i_level: level,
         i_url_hash: urlSplitsHash[level],
+        i_newer_than: new Date(Date.now() - 2 * 24 * 60 * 60 * 1000).toISOString(),
       })
       .range(iteration * 1000, (iteration + 1) * 1000);
 
@@ -847,9 +867,10 @@ export async function queryIndexAtDomainSplitLevelWithMeta(
   while (true) {
     // Query the index for the next set of links
     const { data: _data, error } = await index_supabase_service
-      .rpc("query_index_at_domain_split_level_with_meta_2", {
+      .rpc("query_index_at_domain_split_level_with_meta", {
         i_level: level,
         i_domain_hash: domainSplitsHash[level],
+        i_newer_than: new Date(Date.now() - 2 * 24 * 60 * 60 * 1000).toISOString(),
       })
       .range(iteration * 1000, (iteration + 1) * 1000);
 

@@ -8,8 +8,8 @@ import (
 	"unsafe"
 	// "log"
 
-	md "github.com/tomkosm/html-to-markdown"
-	"github.com/tomkosm/html-to-markdown/plugin"
+	md "github.com/firecrawl/html-to-markdown"
+	"github.com/firecrawl/html-to-markdown/plugin"
 )
 
 //export ConvertHTMLToMarkdown

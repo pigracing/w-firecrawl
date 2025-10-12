@@ -28,13 +28,14 @@ class AsyncWatcher:
         job_id: str,
         *,
         kind: JobKind = "crawl",
+        poll_interval: int = 2,
         timeout: Optional[int] = None,
     ) -> None:
         self._client = client
         self._job_id = job_id
         self._kind = kind
         self._timeout = timeout
-        self._poll_interval: float = 2.0
+        self._poll_interval: float = max(0.0, float(poll_interval))  # Guard against negative values
 
         http_client = getattr(client, "http_client", None)
         if http_client is not None:

@@ -71,12 +71,14 @@ export const htmlTransform = async (
   url: string,
   scrapeOptions: ScrapeOptions,
 ) => {
-  let omce_signatures: string[] | undefined = undefined;
+  let omceSignatures: string[] | undefined = undefined;
 
   if (scrapeOptions.__experimental_omce) {
     try {
-      const hostname = new URL(url).hostname;
-      omce_signatures = await queryOMCESignatures(hostname);
+      const hostname =
+        scrapeOptions.__experimental_omceDomain || new URL(url).hostname;
+      omceSignatures = await queryOMCESignatures(hostname);
+      logger.info("Got OMCE signatures", { signatures: omceSignatures.length });
     } catch (error) {
       logger.warn("Failed to get omce signatures.", {
         error,
@@ -98,7 +100,7 @@ export const htmlTransform = async (
         .map(x => x.trim())
         .filter(x => x.length !== 0),
       onlyMainContent: scrapeOptions.onlyMainContent,
-      omceSignatures: omce_signatures,
+      omceSignatures,
     });
   } catch (error) {
     logger.warn("Failed to call html-transformer! Falling back to cheerio...", {

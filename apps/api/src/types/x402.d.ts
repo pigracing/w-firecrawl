@@ -26,6 +26,17 @@ declare module "x402/dist/cjs/types/index" {
   export default _default;
 }
 
+// Provide shims for internal type imports used by @coinbase/x402
+declare module "x402/types" {
+  export interface FacilitatorConfig {
+    [key: string]: any;
+  }
+}
+
+declare module "x402/verify" {
+  export type CreateHeaders = any;
+}
+
 declare module "x402-express" {
   export function paymentMiddleware(...args: any[]): any;
 

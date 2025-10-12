@@ -14,6 +14,7 @@ enum IntegrationEnum {
   FLOWISE = "flowise",
   METAGPT = "metagpt",
   RELEVANCEAI = "relevanceai",
+  VIASOCKET = "viasocket",
 }
 
 export const integrationSchema = z

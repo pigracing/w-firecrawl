@@ -35,17 +35,6 @@ const zeroDataRetentionFilter = winston.format(info => {
   return info;
 })();
 
-const reduceNoiseFilter = winston.format(info => {
-  if (
-    (info.metadata?.module === "nuq/metrics" ||
-      info.module === "nuq/metrics") &&
-    process.env.NUQ_REDUCE_NOISE === "true"
-  ) {
-    return false; // Don't log this message
-  }
-  return info;
-})();
-
 export const logger = winston.createLogger({
   level: process.env.LOGGING_LEVEL?.toLowerCase() ?? "debug",
   format: winston.format.json({
@@ -82,7 +71,6 @@ export const logger = winston.createLogger({
       : []),
     new winston.transports.Console({
       format: winston.format.combine(
-        reduceNoiseFilter,
         zeroDataRetentionFilter,
         winston.format.timestamp({ format: "YYYY-MM-DD HH:mm:ss" }),
         winston.format.metadata({

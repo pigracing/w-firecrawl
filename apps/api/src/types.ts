@@ -10,19 +10,30 @@ import { ExtractorOptions, Document } from "./lib/entities";
 import { InternalOptions } from "./scraper/scrapeURL";
 import type { CostTracking } from "./lib/cost-tracking";
 import { webhookSchema } from "./services/webhook/schema";
+import { SerializedTraceContext } from "./lib/otel-tracer";
 
-type Mode = "crawl" | "single_urls" | "sitemap" | "kickoff";
+type ScrapeJobCommon = {
+  concurrencyLimited?: boolean;
+  team_id: string;
+  zeroDataRetention: boolean;
+  traceContext?: SerializedTraceContext;
+};
 
-export { Mode };
+export type ScrapeJobData = ScrapeJobCommon &
+  (
+    | ScrapeJobSingleUrlsUnique
+    | ScrapeJobKickoffUnique
+    | ScrapeJobKickoffSitemapUnique
+  );
 
-export interface WebScraperOptions {
+type ScrapeJobSingleUrlsUnique = {
+  mode: "single_urls";
+
   url: string;
-  mode: Mode;
   crawlerOptions?: any;
   scrapeOptions: BaseScrapeOptions;
   internalOptions?: InternalOptions;
-  team_id: string;
-  origin?: string;
+  origin: string;
   crawl_id?: string;
   sitemapped?: boolean;
   webhook?: z.infer<typeof webhookSchema>;
@@ -38,22 +49,53 @@ export interface WebScraperOptions {
   from_extract?: boolean;
   startTime?: number;
 
-  zeroDataRetention: boolean;
   sentry?: any;
   is_extract?: boolean;
-  concurrencyLimited?: boolean;
   apiKeyId: number | null;
-}
+};
+
+export type ScrapeJobSingleUrls = ScrapeJobCommon & ScrapeJobSingleUrlsUnique;
+
+type ScrapeJobKickoffUnique = {
+  mode: "kickoff";
+
+  url: string;
+  crawlerOptions?: any;
+  scrapeOptions: BaseScrapeOptions;
+  internalOptions?: InternalOptions;
+  origin: string;
+  integration?: string | null;
+  crawl_id: string;
+  webhook?: z.infer<typeof webhookSchema>;
+  v1: boolean;
+  apiKeyId: number | null;
+};
+
+export type ScrapeJobKickoff = ScrapeJobCommon & ScrapeJobKickoffUnique;
+
+type ScrapeJobKickoffSitemapUnique = {
+  mode: "kickoff_sitemap";
+
+  crawl_id: string;
+  sitemapUrl: string;
+  location?: ScrapeOptions["location"];
+  origin: string;
+  integration?: string | null;
+  webhook?: z.infer<typeof webhookSchema>;
+  v1: boolean;
+  apiKeyId: number | null;
+};
+
+export type ScrapeJobKickoffSitemap = ScrapeJobCommon &
+  ScrapeJobKickoffSitemapUnique;
 
 export interface RunWebScraperParams {
   url: string;
-  mode: Mode;
   scrapeOptions: ScrapeOptions;
   internalOptions?: InternalOptions;
   team_id: string;
   bull_job_id: string;
   priority?: number;
-  is_scrape?: boolean;
   is_crawl?: boolean;
   urlInvisibleInCurrentCrawl?: boolean;
   costTracking: CostTracking;

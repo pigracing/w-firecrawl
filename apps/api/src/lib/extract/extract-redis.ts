@@ -12,7 +12,6 @@ export enum ExtractStep {
   MULTI_ENTITY_EXTRACT = "multi-entity-extract",
   SCRAPE = "scrape",
   EXTRACT = "extract",
-  COMPLETE = "complete",
 }
 
 type ExtractedStep = {

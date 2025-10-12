@@ -44,7 +44,7 @@ export async function search({
         country,
         location,
       });
-      if (results.length > 0) return results;
+      return results;
     }
     if (process.env.SERPER_API_KEY) {
       logger.info("Using serper search");

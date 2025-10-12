@@ -38,27 +38,31 @@ export async function specialtyScrapeCheck(
     x => x[0].toLowerCase() === "content-type",
   ) ?? [])[1];
 
-  if (contentType === undefined) {
+  if (!contentType) {
     logger.warn("Failed to check contentType -- was not present in headers", {
       headers,
     });
-  } else if (
+    return;
+  }
+
+  if (
     contentType === "application/pdf" ||
     contentType.startsWith("application/pdf;") ||
     (contentType === "application/octet-stream" &&
       (feRes?.file?.content.startsWith("JVBERi0") ||
         feRes?.content.startsWith("%PDF-")))
   ) {
-    // .pdf
     throw new AddFeatureError(["pdf"], await feResToPdfPrefetch(logger, feRes));
-  } else if (
-    contentType ===
-      "application/vnd.openxmlformats-officedocument.wordprocessingml.document" ||
-    contentType.startsWith(
-      "application/vnd.openxmlformats-officedocument.wordprocessingml.document;",
-    )
-  ) {
-    // .docx
-    throw new AddFeatureError(["docx"]);
+  }
+
+  const documentTypes = [
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "application/rtf",
+    "text/rtf",
+    "application/vnd.oasis.opendocument.text",
+  ];
+
+  if (documentTypes.some(type => contentType.startsWith(type))) {
+    throw new AddFeatureError(["document"]);
   }
 }

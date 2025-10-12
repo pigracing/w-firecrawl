@@ -216,7 +216,7 @@ fn _extract_metadata(html: &str) -> Result<HashMap<String, Value>, Box<dyn std::
               if name == "description" {
                 out.insert(
                   name.to_string(),
-                  Value::String(format!("{}, {}", existing, content)),
+                  Value::String(format!("{existing}, {content}")),
                 );
               } else if name != "title" {
                 out.insert(
@@ -402,7 +402,7 @@ fn _transform_html_inner(opts: TransformHtmlOptions) -> Result<String, Box<dyn s
         .collect::<HashSet<_>>();
 
       for mode in modes {
-        let matcher = format!(":{}:", Into::<String>::into(mode.clone()));
+        let matcher = format!(":{}:", Into::<String>::into(mode));
         let signatures = signatures
           .iter()
           .filter(|x| x.contains(&matcher))
@@ -420,7 +420,7 @@ fn _transform_html_inner(opts: TransformHtmlOptions) -> Result<String, Box<dyn s
                 continue;
               }
 
-              let signature = get_node_signature(&node, mode.clone());
+              let signature = get_node_signature(&node, mode);
               if signatures.contains(&signature) {
                 nodes_to_drop.push(node);
               }
@@ -707,7 +707,7 @@ fn _extract_images(html: &str, base_url: &str) -> Result<Vec<String>, Box<dyn st
 
     if let Some(srcset) = attrs.get("srcset") {
       for part in srcset.split(',') {
-        if let Some(url) = part.trim().split_whitespace().next() {
+        if let Some(url) = part.split_whitespace().next() {
           if !url.is_empty() {
             if let Ok(resolved) = resolve_image_url(url) {
               images.insert(resolved);
@@ -730,7 +730,7 @@ fn _extract_images(html: &str, base_url: &str) -> Result<Vec<String>, Box<dyn st
   for source in source_elements {
     if let Some(srcset) = source.attributes.borrow().get("srcset") {
       for part in srcset.split(',') {
-        if let Some(url) = part.trim().split_whitespace().next() {
+        if let Some(url) = part.split_whitespace().next() {
           if !url.is_empty() {
             if let Ok(resolved) = resolve_image_url(url) {
               images.insert(resolved);

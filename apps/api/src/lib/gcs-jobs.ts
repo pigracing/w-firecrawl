@@ -2,6 +2,7 @@ import { FirecrawlJob } from "../types";
 import { ApiError, Storage } from "@google-cloud/storage";
 import { logger } from "./logger";
 import { Document } from "../controllers/v1/types";
+import { withSpan, setSpanAttributes } from "./otel-tracer";
 
 const credentials = process.env.GCS_CREDENTIALS
   ? JSON.parse(atob(process.env.GCS_CREDENTIALS))
@@ -9,13 +10,25 @@ const credentials = process.env.GCS_CREDENTIALS
 export const storage = new Storage({ credentials });
 
 export async function saveJobToGCS(job: FirecrawlJob): Promise<void> {
-  try {
+  return await withSpan("firecrawl-gcs-save-job", async span => {
+    setSpanAttributes(span, {
+      "gcs.operation": "save_job",
+      "job.id": job.job_id,
+      "job.team_id": job.team_id,
+      "job.mode": job.mode,
+      "job.success": job.success,
+      "job.num_docs": job.num_docs,
+    });
+
     if (!process.env.GCS_BUCKET_NAME) {
+      setSpanAttributes(span, { "gcs.bucket_configured": false });
       return;
     }
 
     const bucket = storage.bucket(process.env.GCS_BUCKET_NAME);
     const blob = bucket.file(`${job.job_id}.json`);
+
+    // Save job docs with retry
     for (let i = 0; i < 3; i++) {
       try {
         await blob.save(JSON.stringify(job.docs), {
@@ -35,6 +48,8 @@ export async function saveJobToGCS(job: FirecrawlJob): Promise<void> {
         }
       }
     }
+
+    // Save job metadata with retry
     for (let i = 0; i < 3; i++) {
       try {
         await blob.setMetadata({
@@ -74,72 +89,96 @@ export async function saveJobToGCS(job: FirecrawlJob): Promise<void> {
         }
       }
     }
-  } catch (error) {
+
+    setSpanAttributes(span, { "gcs.save_successful": true });
+  }).catch(error => {
     logger.error(`Error saving job to GCS`, {
       error,
       scrapeId: job.job_id,
       jobId: job.job_id,
     });
-  }
+    throw error;
+  });
 }
 
 export async function getJobFromGCS(jobId: string): Promise<Document[] | null> {
-  try {
+  return await withSpan("firecrawl-gcs-get-job", async span => {
+    setSpanAttributes(span, {
+      "gcs.operation": "get_job",
+      "job.id": jobId,
+    });
+
     if (!process.env.GCS_BUCKET_NAME) {
+      setSpanAttributes(span, { "gcs.bucket_configured": false });
       return null;
     }
 
     const bucket = storage.bucket(process.env.GCS_BUCKET_NAME);
     const blob = bucket.file(`${jobId}.json`);
-    const [content] = await blob.download();
-    const x = JSON.parse(content.toString());
-    return x;
-  } catch (error) {
-    if (
-      error instanceof ApiError &&
-      error.code === 404 &&
-      error.message.includes("No such object:")
-    ) {
-      // Object does not exist
-      return null;
-    }
 
-    logger.error(`Error getting job from GCS`, {
-      error,
-      jobId,
-      scrapeId: jobId,
-    });
-    return null;
-  }
+    try {
+      const [content] = await blob.download();
+      const result = JSON.parse(content.toString());
+      setSpanAttributes(span, { "gcs.job_found": true });
+      return result;
+    } catch (error) {
+      if (
+        error instanceof ApiError &&
+        error.code === 404 &&
+        error.message.includes("No such object:")
+      ) {
+        setSpanAttributes(span, { "gcs.job_found": false });
+        return null;
+      }
+
+      logger.error(`Error getting job from GCS`, {
+        error,
+        jobId,
+        scrapeId: jobId,
+      });
+      throw error;
+    }
+  });
 }
 
 export async function removeJobFromGCS(jobId: string): Promise<void> {
-  try {
+  return await withSpan("firecrawl-gcs-remove-job", async span => {
+    setSpanAttributes(span, {
+      "gcs.operation": "remove_job",
+      "job.id": jobId,
+    });
+
     if (!process.env.GCS_BUCKET_NAME) {
+      setSpanAttributes(span, { "gcs.bucket_configured": false });
       return;
     }
 
     const bucket = storage.bucket(process.env.GCS_BUCKET_NAME);
     const blob = bucket.file(`${jobId}.json`);
-    await blob.delete({
-      ignoreNotFound: true,
-    });
-  } catch (error) {
-    if (
-      error instanceof ApiError &&
-      error.code === 404 &&
-      error.message.includes("No such object:")
-    ) {
-      // Object does not exist
-      return;
-    }
 
-    logger.error(`Error removing job from GCS`, {
-      error,
-      jobId,
-      scrapeId: jobId,
-    });
-  }
+    try {
+      await blob.delete({
+        ignoreNotFound: true,
+      });
+      setSpanAttributes(span, { "gcs.delete_successful": true });
+    } catch (error) {
+      if (
+        error instanceof ApiError &&
+        error.code === 404 &&
+        error.message.includes("No such object:")
+      ) {
+        setSpanAttributes(span, { "gcs.job_not_found": true });
+        return;
+      }
+
+      logger.error(`Error removing job from GCS`, {
+        error,
+        jobId,
+        scrapeId: jobId,
+      });
+      throw error;
+    }
+  });
 }
 
 // TODO: fix the any type (we have multiple Document types in the codebase)

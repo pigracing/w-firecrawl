@@ -45,4 +45,37 @@ describe("Search tests", () => {
     },
     125000,
   );
+
+  it.concurrent(
+    "respects limit",
+    async () => {
+      const res = await search(
+        {
+          query: "firecrawl",
+          limit: 3,
+        },
+        identity,
+      );
+
+      expect(res.length).toBeGreaterThan(0);
+      expect(res.length).toBeLessThanOrEqual(3);
+    },
+    60000,
+  );
+
+  it.concurrent(
+    "respects limit for above 10",
+    async () => {
+      const res = await search(
+        {
+          query: "firecrawl",
+          limit: 20,
+        },
+        identity,
+      );
+      expect(res.length).toBeGreaterThan(0);
+      expect(res.length).toBeLessThanOrEqual(20);
+    },
+    60000,
+  );
 });

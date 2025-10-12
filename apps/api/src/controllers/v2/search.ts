@@ -12,7 +12,6 @@ import { billTeam } from "../../services/billing/credit_billing";
 import { v4 as uuidv4 } from "uuid";
 import { addScrapeJob, waitForJob } from "../../services/queue-jobs";
 import { logJob } from "../../services/logging/log_job";
-import { Mode } from "../../types";
 import { search } from "../../search/v2";
 import { isUrlBlocked } from "../../scraper/WebScraper/utils/blocklist";
 import * as Sentry from "@sentry/node";
@@ -22,7 +21,7 @@ import { getJobPriority } from "../../lib/job-priority";
 import { CostTracking } from "../../lib/cost-tracking";
 import { calculateCreditsToBeBilled } from "../../lib/scrape-billing";
 import { supabase_service } from "../../services/supabase";
-import { SearchResult, SearchV2Response } from "../../lib/entities";
+import { SearchV2Response } from "../../lib/entities";
 import { ScrapeJobTimeoutError } from "../../lib/error";
 import { scrapeQueue } from "../../services/worker/nuq";
 import { z } from "zod";
@@ -78,7 +77,7 @@ async function startScrapeJob(
   await addScrapeJob(
     {
       url: searchResult.url,
-      mode: "single_urls" as Mode,
+      mode: "single_urls",
       team_id: options.teamId,
       scrapeOptions: {
         ...options.scrapeOptions,
@@ -100,6 +99,7 @@ async function startScrapeJob(
     jobId,
     jobPriority,
     directToBullMQ,
+    true,
   );
 
   return jobId;
@@ -140,7 +140,7 @@ async function scrapeSearchResult(
       origin: options.origin,
     });
 
-    await scrapeQueue.removeJob(jobId);
+    await scrapeQueue.removeJob(jobId, logger);
 
     const document = {
       title: searchResult.title,
@@ -201,6 +201,11 @@ export async function searchController(
   req: RequestWithAuth<{}, SearchResponse, SearchRequest>,
   res: Response<SearchResponse>,
 ) {
+  // Get timing data from middleware (includes all middleware processing time)
+  const middlewareStartTime =
+    (req as any).requestTiming?.startTime || new Date().getTime();
+  const controllerStartTime = new Date().getTime();
+
   const jobId = uuidv4();
   let logger = _logger.child({
     jobId,
@@ -218,7 +223,7 @@ export async function searchController(
     });
   }
 
-  const startTime = new Date().getTime();
+  const middlewareTime = controllerStartTime - middlewareStartTime;
   const isSearchPreview =
     process.env.SEARCH_PREVIEW_TOKEN !== undefined &&
     process.env.SEARCH_PREVIEW_TOKEN === req.body.__searchPreviewToken;
@@ -229,6 +234,7 @@ export async function searchController(
     req.body = searchRequestSchema.parse(req.body);
 
     logger = logger.child({
+      version: "v2",
       query: req.body.query,
       origin: req.body.origin,
     });
@@ -262,13 +268,6 @@ export async function searchController(
       location: req.body.location,
       type: searchTypes,
     })) as SearchV2Response;
-
-    // Apply URL filtering if needed
-    if (req.body.ignoreInvalidURLs && searchResponse.web) {
-      searchResponse.web = searchResponse.web.filter(
-        result => !isUrlBlocked(result.url, req.acuc?.flags ?? null),
-      );
-    }
 
     // Add category labels to web results
     if (searchResponse.web && searchResponse.web.length > 0) {
@@ -477,7 +476,7 @@ export async function searchController(
         credits_billed = allJobIds.length; // Just for reporting, not billing
 
         const endTime = new Date().getTime();
-        const timeTakenInSeconds = (endTime - startTime) / 1000;
+        const timeTakenInSeconds = (endTime - middlewareStartTime) / 1000;
 
         logger.info("Logging job (async scraping)", {
           num_docs: credits_billed,
@@ -512,6 +511,21 @@ export async function searchController(
           false,
           isSearchPreview,
         );
+
+        // Log final timing information for async mode
+        const totalRequestTime = new Date().getTime() - middlewareStartTime;
+        const controllerTime = new Date().getTime() - controllerStartTime;
+        logger.info("Search completed successfully (async)", {
+          version: "v2",
+          jobId,
+          middlewareStartTime,
+          controllerStartTime,
+          middlewareTime,
+          controllerTime,
+          totalRequestTime,
+          creditsUsed: credits_billed,
+          scrapeful: shouldScrape,
+        });
 
         return res.status(200).json({
           success: true,
@@ -620,7 +634,7 @@ export async function searchController(
     }
 
     const endTime = new Date().getTime();
-    const timeTakenInSeconds = (endTime - startTime) / 1000;
+    const timeTakenInSeconds = (endTime - middlewareStartTime) / 1000;
 
     logger.info("Logging job", {
       num_docs: credits_billed,
@@ -656,6 +670,23 @@ export async function searchController(
       isSearchPreview,
     );
 
+    // Log final timing information
+    const totalRequestTime = new Date().getTime() - middlewareStartTime;
+    const controllerTime = new Date().getTime() - controllerStartTime;
+
+    logger.info("Request metrics", {
+      version: "v2",
+      jobId,
+      mode: "search",
+      middlewareStartTime,
+      controllerStartTime,
+      middlewareTime,
+      controllerTime,
+      totalRequestTime,
+      creditsUsed: credits_billed,
+      scrapeful: shouldScrape,
+    });
+
     // For sync scraping or no scraping, don't include scrapeIds
     return res.status(200).json({
       success: true,
@@ -681,7 +712,10 @@ export async function searchController(
     }
 
     Sentry.captureException(error);
-    logger.error("Unhandled error occurred in search", { error });
+    logger.error("Unhandled error occurred in search", {
+      version: "v2",
+      error,
+    });
     return res.status(500).json({
       success: false,
       error: error.message,

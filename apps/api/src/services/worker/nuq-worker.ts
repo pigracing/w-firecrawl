@@ -4,10 +4,17 @@ import { processJobInternal } from "./scrape-worker";
 import { scrapeQueue, nuqGetLocalMetrics, nuqHealthCheck } from "./nuq";
 import Express from "express";
 import { _ } from "ajv";
+import { initializeBlocklist } from "../../scraper/WebScraper/utils/blocklist";
 
 (async () => {
+  try {
+    await initializeBlocklist();
+  } catch (error) {
+    _logger.error("Failed to initialize blocklist", { error });
+    process.exit(1);
+  }
+
   let isShuttingDown = false;
-  const myLock = crypto.randomUUID();
 
   const app = Express();
 
@@ -36,15 +43,17 @@ import { _ } from "ajv";
   process.on("SIGINT", shutdown);
   process.on("SIGTERM", shutdown);
 
-  let noJobTimeout = 500;
+  let noJobTimeout = 1500;
 
   while (!isShuttingDown) {
-    const job = await scrapeQueue.getJobToProcess(myLock);
+    const job = await scrapeQueue.getJobToProcess();
 
     if (job === null) {
       _logger.info("No jobs to process", { module: "nuq/metrics" });
       await new Promise(resolve => setTimeout(resolve, noJobTimeout));
-      noJobTimeout = Math.min(noJobTimeout * 2, 10000);
+      if (!process.env.NUQ_RABBITMQ_URL) {
+        noJobTimeout = Math.min(noJobTimeout * 2, 10000);
+      }
       continue;
     }
 
@@ -60,7 +69,7 @@ import { _ } from "ajv";
 
     const lockRenewInterval = setInterval(async () => {
       logger.info("Renewing lock");
-      if (!(await scrapeQueue.renewLock(job.id, myLock, logger))) {
+      if (!(await scrapeQueue.renewLock(job.id, job.lock!, logger))) {
         logger.warn("Failed to renew lock");
         clearInterval(lockRenewInterval);
         return;
@@ -84,7 +93,7 @@ import { _ } from "ajv";
       if (
         !(await scrapeQueue.jobFinish(
           job.id,
-          myLock,
+          job.lock!,
           processResult.data,
           logger,
         ))
@@ -95,7 +104,7 @@ import { _ } from "ajv";
       if (
         !(await scrapeQueue.jobFail(
           job.id,
-          myLock,
+          job.lock!,
           processResult.error instanceof Error
             ? processResult.error.message
             : typeof processResult.error === "string"

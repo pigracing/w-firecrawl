@@ -2,9 +2,10 @@ import { InternalOptions } from "../scraper/scrapeURL";
 import { ScrapeOptions, TeamFlags } from "../controllers/v2/types";
 import { WebCrawler } from "../scraper/WebScraper/crawler";
 import { redisEvictConnection } from "../services/redis";
-import { logger as _logger, logger } from "./logger";
+import { logger as _logger } from "./logger";
 import { getAdjustedMaxDepth } from "../scraper/WebScraper/utils/maxDepthUtils";
 import type { Logger } from "winston";
+import { withSpan, setSpanAttributes } from "./otel-tracer";
 
 export type StoredCrawl = {
   originUrl?: string;
@@ -20,22 +21,36 @@ export type StoredCrawl = {
 };
 
 export async function saveCrawl(id: string, crawl: StoredCrawl) {
-  _logger.debug("Saving crawl " + id + " to Redis...", {
-    crawl,
-    module: "crawl-redis",
-    method: "saveCrawl",
-    crawlId: id,
-    teamId: crawl.team_id,
-    zeroDataRetention: crawl.zeroDataRetention,
-  });
-  await redisEvictConnection.set("crawl:" + id, JSON.stringify(crawl));
-  await redisEvictConnection.expire("crawl:" + id, 24 * 60 * 60);
+  return await withSpan("firecrawl-redis-save-crawl", async span => {
+    setSpanAttributes(span, {
+      "crawl.id": id,
+      "crawl.team_id": crawl.team_id,
+      "crawl.zero_data_retention": crawl.zeroDataRetention || false,
+      operation: "save_crawl",
+    });
 
-  await redisEvictConnection.sadd("crawls_by_team_id:" + crawl.team_id, id);
-  await redisEvictConnection.expire(
-    "crawls_by_team_id:" + crawl.team_id,
-    24 * 60 * 60,
-  );
+    _logger.debug("Saving crawl " + id + " to Redis...", {
+      crawl,
+      module: "crawl-redis",
+      method: "saveCrawl",
+      crawlId: id,
+      teamId: crawl.team_id,
+      zeroDataRetention: crawl.zeroDataRetention,
+    });
+
+    await redisEvictConnection.set("crawl:" + id, JSON.stringify(crawl));
+    await redisEvictConnection.expire("crawl:" + id, 24 * 60 * 60);
+
+    await redisEvictConnection.sadd("crawls_by_team_id:" + crawl.team_id, id);
+    await redisEvictConnection.expire(
+      "crawls_by_team_id:" + crawl.team_id,
+      24 * 60 * 60,
+    );
+  });
+}
+
+export async function markCrawlActive(id: string) {
+  await redisEvictConnection.sadd("active_crawls", id);
 }
 
 export async function getCrawlsByTeamId(team_id: string): Promise<string[]> {
@@ -43,14 +58,29 @@ export async function getCrawlsByTeamId(team_id: string): Promise<string[]> {
 }
 
 export async function getCrawl(id: string): Promise<StoredCrawl | null> {
-  const x = await redisEvictConnection.get("crawl:" + id);
+  return await withSpan("firecrawl-redis-get-crawl", async span => {
+    setSpanAttributes(span, {
+      "crawl.id": id,
+      operation: "get_crawl",
+    });
 
-  if (x === null) {
-    return null;
-  }
+    const x = await redisEvictConnection.get("crawl:" + id);
 
-  await redisEvictConnection.expire("crawl:" + id, 24 * 60 * 60);
-  return JSON.parse(x);
+    if (x === null) {
+      setSpanAttributes(span, { "crawl.found": false });
+      return null;
+    }
+
+    await redisEvictConnection.expire("crawl:" + id, 24 * 60 * 60);
+    const crawl = JSON.parse(x);
+
+    setSpanAttributes(span, {
+      "crawl.found": true,
+      "crawl.team_id": crawl.team_id,
+    });
+
+    return crawl;
+  });
 }
 
 export async function getCrawlExpiry(id: string): Promise<Date> {
@@ -66,19 +96,28 @@ export async function addCrawlJob(
   job_id: string,
   __logger: Logger = _logger,
 ) {
-  __logger.debug("Adding crawl job " + job_id + " to Redis...", {
-    jobId: job_id,
-    module: "crawl-redis",
-    method: "addCrawlJob",
-    crawlId: id,
+  return await withSpan("firecrawl-redis-add-crawl-job", async span => {
+    setSpanAttributes(span, {
+      "crawl.id": id,
+      "crawl.job_id": job_id,
+      operation: "add_crawl_job",
+    });
+
+    __logger.debug("Adding crawl job " + job_id + " to Redis...", {
+      jobId: job_id,
+      module: "crawl-redis",
+      method: "addCrawlJob",
+      crawlId: id,
+    });
+
+    await redisEvictConnection.sadd("crawl:" + id + ":jobs", job_id);
+    await redisEvictConnection.expire("crawl:" + id + ":jobs", 24 * 60 * 60);
+    await redisEvictConnection.sadd("crawl:" + id + ":jobs_qualified", job_id);
+    await redisEvictConnection.expire(
+      "crawl:" + id + ":jobs_qualified",
+      24 * 60 * 60,
+    );
   });
-  await redisEvictConnection.sadd("crawl:" + id + ":jobs", job_id);
-  await redisEvictConnection.expire("crawl:" + id + ":jobs", 24 * 60 * 60);
-  await redisEvictConnection.sadd("crawl:" + id + ":jobs_qualified", job_id);
-  await redisEvictConnection.expire(
-    "crawl:" + id + ":jobs_qualified",
-    24 * 60 * 60,
-  );
 }
 
 export async function addCrawlJobs(
@@ -186,6 +225,9 @@ export async function getDoneJobsOrderedUntil(
     "crawl:" + id + ":jobs_donez_ordered",
     -Infinity,
     until,
+    "LIMIT",
+    start,
+    count,
   );
 }
 
@@ -197,7 +239,7 @@ async function isCrawlFinished(id: string) {
   return (
     (await redisEvictConnection.scard("crawl:" + id + ":jobs_done")) ===
       (await redisEvictConnection.scard("crawl:" + id + ":jobs")) &&
-    (await redisEvictConnection.get("crawl:" + id + ":kickoff:finish")) !== null
+    (await isCrawlKickoffFinished(id))
   );
 }
 
@@ -207,7 +249,10 @@ export async function isCrawlKickoffFinished(id: string) {
     24 * 60 * 60,
   );
   return (
-    (await redisEvictConnection.get("crawl:" + id + ":kickoff:finish")) !== null
+    (await redisEvictConnection.get("crawl:" + id + ":kickoff:finish")) !==
+      null &&
+    (await redisEvictConnection.scard("crawl:" + id + ":sitemap_jobs_done")) ===
+      (await redisEvictConnection.scard("crawl:" + id + ":sitemap_jobs"))
   );
 }
 
@@ -256,6 +301,8 @@ export async function finishCrawl(id: string, __logger: Logger = _logger) {
   });
   await redisEvictConnection.set("crawl:" + id + ":finish", "yes");
   await redisEvictConnection.expire("crawl:" + id + ":finish", 24 * 60 * 60);
+
+  await redisEvictConnection.srem("active_crawls", id);
 
   const crawl = await getCrawl(id);
   if (crawl && crawl.team_id) {
@@ -385,41 +432,57 @@ export async function lockURL(
   sc: StoredCrawl,
   url: string,
 ): Promise<boolean> {
-  url = normalizeURL(url, sc);
+  return await withSpan("firecrawl-redis-lock-url", async span => {
+    const normalizedUrl = normalizeURL(url, sc);
+    setSpanAttributes(span, {
+      "crawl.id": id,
+      "crawl.url": normalizedUrl,
+      "crawl.team_id": sc.team_id,
+      operation: "lock_url",
+    });
 
-  if (typeof sc.crawlerOptions?.limit === "number") {
-    if (
-      (await redisEvictConnection.scard("crawl:" + id + ":visited_unique")) >=
-      sc.crawlerOptions.limit
-    ) {
-      return false;
+    if (typeof sc.crawlerOptions?.limit === "number") {
+      if (
+        (await redisEvictConnection.scard("crawl:" + id + ":visited_unique")) >=
+        sc.crawlerOptions.limit
+      ) {
+        setSpanAttributes(span, { "crawl.limit_reached": true });
+        return false;
+      }
     }
-  }
 
-  let res: boolean;
-  if (!sc.crawlerOptions?.deduplicateSimilarURLs) {
-    res =
-      (await redisEvictConnection.sadd("crawl:" + id + ":visited", url)) !== 0;
-  } else {
-    const permutation = generateURLPermutations(url)[0].href;
-    const x = await redisEvictConnection.sadd(
-      "crawl:" + id + ":visited",
-      permutation,
-    );
-    res = x !== 0;
-  }
+    let res: boolean;
+    if (!sc.crawlerOptions?.deduplicateSimilarURLs) {
+      res =
+        (await redisEvictConnection.sadd(
+          "crawl:" + id + ":visited",
+          normalizedUrl,
+        )) !== 0;
+    } else {
+      const permutation = generateURLPermutations(normalizedUrl)[0].href;
+      const x = await redisEvictConnection.sadd(
+        "crawl:" + id + ":visited",
+        permutation,
+      );
+      res = x !== 0;
+    }
 
-  await redisEvictConnection.expire("crawl:" + id + ":visited", 24 * 60 * 60);
+    await redisEvictConnection.expire("crawl:" + id + ":visited", 24 * 60 * 60);
 
-  if (res) {
-    await redisEvictConnection.sadd("crawl:" + id + ":visited_unique", url);
-    await redisEvictConnection.expire(
-      "crawl:" + id + ":visited_unique",
-      24 * 60 * 60,
-    );
-  }
+    if (res) {
+      await redisEvictConnection.sadd(
+        "crawl:" + id + ":visited_unique",
+        normalizedUrl,
+      );
+      await redisEvictConnection.expire(
+        "crawl:" + id + ":visited_unique",
+        24 * 60 * 60,
+      );
+    }
 
-  return res;
+    setSpanAttributes(span, { "crawl.url_locked": res });
+    return res;
+  });
 }
 
 /// NOTE: does not check limit. only use if limit is checked beforehand e.g. with sitemap

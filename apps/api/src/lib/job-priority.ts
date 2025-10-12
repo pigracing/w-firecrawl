@@ -1,5 +1,5 @@
 import { RateLimiterMode } from "../types";
-import { getACUC, getACUCTeam } from "../controllers/auth";
+import { getACUCTeam } from "../controllers/auth";
 import { redisEvictConnection } from "../services/redis";
 import { logger } from "./logger";
 

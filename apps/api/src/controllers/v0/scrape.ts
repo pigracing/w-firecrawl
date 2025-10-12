@@ -82,6 +82,8 @@ async function scrapeHelper(
     },
     jobId,
     await getJobPriority({ team_id, basePriority: 10 }),
+    false,
+    true,
   );
 
   let doc;

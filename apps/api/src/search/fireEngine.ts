@@ -2,8 +2,17 @@ import dotenv from "dotenv";
 import { SearchResult } from "../../src/lib/entities";
 import * as Sentry from "@sentry/node";
 import { logger } from "../lib/logger";
+import { executeWithRetry, attemptRequest } from "../lib/retry-utils";
 
 dotenv.config();
+
+const useFireEngine =
+  process.env.FIRE_ENGINE_BETA_URL !== "" &&
+  process.env.FIRE_ENGINE_BETA_URL !== undefined;
+
+function hasResults(results: unknown): results is SearchResult[] {
+  return Array.isArray(results) && results.length > 0;
+}
 
 export async function fire_engine_search(
   q: string,
@@ -18,42 +27,30 @@ export async function fire_engine_search(
   },
   abort?: AbortSignal,
 ): Promise<SearchResult[]> {
-  try {
-    let data = JSON.stringify({
-      query: q,
-      lang: options.lang,
-      country: options.country,
-      location: options.location,
-      tbs: options.tbs,
-      numResults: options.numResults,
-      page: options.page ?? 1,
-    });
-
-    if (!process.env.FIRE_ENGINE_BETA_URL) {
-      return [];
-    }
-
-    const response = await fetch(`${process.env.FIRE_ENGINE_BETA_URL}/search`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "X-Disable-Cache": "true",
-      },
-      body: data,
-      signal: abort,
-    });
-
-    if (response.ok) {
-      const responseData = await response.json();
-      return responseData;
-    } else {
-      return [];
-    }
-  } catch (error) {
-    logger.error(error);
-    Sentry.captureException(error);
+  if (!useFireEngine) {
     return [];
   }
+
+  const payload = {
+    query: q,
+    lang: options.lang,
+    country: options.country,
+    location: options.location,
+    tbs: options.tbs,
+    numResults: options.numResults,
+    page: options.page ?? 1,
+  };
+
+  const url = `${process.env.FIRE_ENGINE_BETA_URL}/search`;
+  const data = JSON.stringify(payload);
+
+  const result = await executeWithRetry<SearchResult[]>(
+    () => attemptRequest<SearchResult[]>(url, data, abort),
+    hasResults,
+    abort,
+  );
+
+  return result ?? [];
 }
 
 export async function fireEngineMap(
@@ -69,43 +66,31 @@ export async function fireEngineMap(
   },
   abort?: AbortSignal,
 ): Promise<SearchResult[]> {
-  try {
-    let data = JSON.stringify({
-      query: q,
-      lang: options.lang,
-      country: options.country,
-      location: options.location,
-      tbs: options.tbs,
-      numResults: options.numResults,
-      page: options.page ?? 1,
-    });
-
-    if (!process.env.FIRE_ENGINE_BETA_URL) {
-      logger.warn(
-        "(v1/map Beta) Results might differ from cloud offering currently.",
-      );
-      return [];
-    }
-
-    const response = await fetch(`${process.env.FIRE_ENGINE_BETA_URL}/map`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "X-Disable-Cache": "true",
-      },
-      body: data,
-      signal: abort,
-    });
-
-    if (response.ok) {
-      const responseData = await response.json();
-      return responseData;
-    } else {
-      return [];
-    }
-  } catch (error) {
-    logger.error(error);
-    Sentry.captureException(error);
+  if (!useFireEngine) {
+    logger.warn(
+      "(v1/map Beta) Results might differ from cloud offering currently.",
+    );
     return [];
   }
+
+  const payload = {
+    query: q,
+    lang: options.lang,
+    country: options.country,
+    location: options.location,
+    tbs: options.tbs,
+    numResults: options.numResults,
+    page: options.page ?? 1,
+  };
+
+  const url = `${process.env.FIRE_ENGINE_BETA_URL}/map`;
+  const data = JSON.stringify(payload);
+
+  const result = await executeWithRetry<SearchResult[]>(
+    () => attemptRequest<SearchResult[]>(url, data, abort),
+    hasResults,
+    abort,
+  );
+
+  return result ?? [];
 }

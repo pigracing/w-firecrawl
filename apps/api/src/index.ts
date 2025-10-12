@@ -1,4 +1,5 @@
 import "dotenv/config";
+import { shutdownOtel } from "./otel";
 import "./services/sentry";
 import * as Sentry from "@sentry/node";
 import express, { NextFunction, Request, Response } from "express";
@@ -30,15 +31,10 @@ import { attachWsProxy } from "./services/agentLivecastWS";
 import { cacheableLookup } from "./scraper/scrapeURL/lib/cacheableLookup";
 import { v2Router } from "./routes/v2";
 import domainFrequencyRouter from "./routes/domain-frequency";
-import { NodeSDK } from "@opentelemetry/sdk-node";
-import { LangfuseExporter } from "langfuse-vercel";
-import { getNodeAutoInstrumentations } from "@opentelemetry/auto-instrumentations-node";
-import { ATTR_SERVICE_NAME } from "@opentelemetry/semantic-conventions";
-import { resourceFromAttributes } from "@opentelemetry/resources";
-import { BatchSpanProcessor } from "@opentelemetry/sdk-trace-node";
-import { OTLPTraceExporter } from "@opentelemetry/exporter-trace-otlp-grpc";
 import { nuqShutdown } from "./services/worker/nuq";
 import { getErrorContactMessage } from "./lib/deployment";
+import { initializeBlocklist } from "./scraper/WebScraper/utils/blocklist";
+import responseTime from "response-time";
 
 const { createBullBoard } = require("@bull-board/api");
 const { BullMQAdapter } = require("@bull-board/api/bullMQAdapter");
@@ -55,35 +51,6 @@ logger.info("Network info dump", {
 cacheableLookup.install(http.globalAgent);
 cacheableLookup.install(https.globalAgent);
 
-const shouldOtel =
-  process.env.LANGFUSE_PUBLIC_KEY || process.env.OTEL_EXPORTER_OTLP_ENDPOINT;
-const otelSdk = shouldOtel
-  ? new NodeSDK({
-      resource: resourceFromAttributes({
-        [ATTR_SERVICE_NAME]: "firecrawl-app",
-      }),
-      spanProcessors: [
-        ...(process.env.LANGFUSE_PUBLIC_KEY
-          ? [new BatchSpanProcessor(new LangfuseExporter())]
-          : []),
-        ...(process.env.OTEL_EXPORTER_OTLP_ENDPOINT
-          ? [
-              new BatchSpanProcessor(
-                new OTLPTraceExporter({
-                  url: process.env.OTEL_EXPORTER_OTLP_ENDPOINT,
-                }),
-              ),
-            ]
-          : []),
-      ],
-      instrumentations: [getNodeAutoInstrumentations()],
-    })
-  : null;
-
-if (otelSdk) {
-  otelSdk.start();
-}
-
 // Initialize Express with WebSocket support
 const expressApp = express();
 const ws = expressWs(expressApp);
@@ -95,6 +62,8 @@ app.use(bodyParser.urlencoded({ extended: true }));
 app.use(bodyParser.json({ limit: "10mb" }));
 
 app.use(cors()); // Add this line to enable CORS
+
+app.use(responseTime());
 
 if (process.env.EXPRESS_TRUST_PROXY) {
   app.set("trust proxy", parseInt(process.env.EXPRESS_TRUST_PROXY, 10));
@@ -138,7 +107,14 @@ app.use(domainFrequencyRouter);
 const DEFAULT_PORT = process.env.PORT ?? 3002;
 const HOST = process.env.HOST ?? "localhost";
 
-function startServer(port = DEFAULT_PORT) {
+async function startServer(port = DEFAULT_PORT) {
+  try {
+    await initializeBlocklist();
+  } catch (error) {
+    logger.error("Failed to initialize blocklist", { error });
+    throw error;
+  }
+
   // Attach WebSocket proxy to the Express app
   attachWsProxy(app);
 
@@ -157,14 +133,10 @@ function startServer(port = DEFAULT_PORT) {
       logger.info("Server closed.");
       nuqShutdown().finally(() => {
         logger.info("NUQ shutdown complete");
-        if (otelSdk) {
-          otelSdk.shutdown().finally(() => {
-            logger.info("OTEL shutdown");
-            process.exit(0);
-          });
-        } else {
+        shutdownOtel().finally(() => {
+          logger.info("OTEL shutdown");
           process.exit(0);
-        }
+        });
       });
     });
   };
@@ -175,7 +147,10 @@ function startServer(port = DEFAULT_PORT) {
 }
 
 if (require.main === module) {
-  startServer();
+  startServer().catch(error => {
+    logger.error("Failed to start server", { error });
+    process.exit(1);
+  });
 }
 
 app.get("/is-production", (req, res) => {
@@ -197,10 +172,15 @@ app.use(
         logger.warn("Unsupported protocol error: " + JSON.stringify(req.body));
       }
 
+      const customErrorMessage =
+        err.errors.length > 0 && err.errors[0].code === "custom"
+          ? err.errors[0].message
+          : "Bad Request";
+
       res.status(400).json({
         success: false,
         code: "BAD_REQUEST",
-        error: "Bad Request",
+        error: customErrorMessage,
         details: err.errors,
       });
     } else {

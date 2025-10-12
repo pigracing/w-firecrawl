@@ -41,6 +41,9 @@ export async function crawlErrorsController(
     res.status(200).json({
       errors: failedJobs
         .map(x => {
+          if (x.data.mode !== "single_urls") {
+            return null;
+          }
           const error = deserializeTransportableError(
             x.failedReason!,
           ) as TransportableError | null;

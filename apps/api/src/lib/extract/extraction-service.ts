@@ -40,7 +40,6 @@ import { normalizeUrl } from "../canonical-url";
 import { search } from "../../search";
 import { buildRephraseToSerpPrompt } from "./build-prompts";
 import { getACUCTeam } from "../../controllers/auth";
-import { langfuse } from "../../services/langfuse";
 import { CostLimitExceededError, CostTracking } from "../cost-tracking";
 
 interface ExtractServiceOptions {
@@ -51,6 +50,7 @@ interface ExtractServiceOptions {
   cacheKey?: string;
   agent?: boolean;
   apiKeyId: number | null;
+  createdAt?: number;
 }
 
 export interface ExtractResult {
@@ -79,6 +79,9 @@ export async function performExtraction(
   options: ExtractServiceOptions,
 ): Promise<ExtractResult> {
   const { request, teamId, subId, apiKeyId } = options;
+  const createdAt = options.createdAt
+    ? new Date(options.createdAt)
+    : new Date();
   const urlTraces: URLTrace[] = [];
   let docsMap: Map<string, Document> = new Map();
   let singleAnswerCompletions: completions | null = null;
@@ -99,18 +102,9 @@ export async function performExtraction(
   const logger = _logger.child({
     module: "extract",
     method: "performExtraction",
+    extractModel: "fire-1",
     extractId,
     teamId,
-  });
-
-  langfuse.trace({
-    id: "extract:" + extractId,
-    name: "performExtraction",
-    metadata: {
-      teamId,
-      extractId,
-      model: "fire-1",
-    },
   });
 
   try {
@@ -145,7 +139,7 @@ export async function performExtraction(
         message: "No search results found",
         num_docs: 1,
         docs: [],
-        time_taken: (new Date().getTime() - Date.now()) / 1000,
+        time_taken: (new Date().getTime() - createdAt.getTime()) / 1000,
         team_id: teamId,
         mode: "extract",
         url: request.urls?.join(", ") || "",
@@ -691,7 +685,7 @@ export async function performExtraction(
               : "Failed to transform array to object",
           num_docs: 1,
           docs: [],
-          time_taken: (new Date().getTime() - Date.now()) / 1000,
+          time_taken: (new Date().getTime() - createdAt.getTime()) / 1000,
           team_id: teamId,
           mode: "extract",
           url: request.urls?.join(", ") || "",
@@ -808,7 +802,7 @@ export async function performExtraction(
           message: error.message,
           num_docs: 1,
           docs: [],
-          time_taken: (new Date().getTime() - Date.now()) / 1000,
+          time_taken: (new Date().getTime() - createdAt.getTime()) / 1000,
           team_id: teamId,
           mode: "extract",
           url: request.urls?.join(", ") || "",
@@ -844,7 +838,8 @@ export async function performExtraction(
 
       if (docsMap.size == 0) {
         // All urls are invalid
-        const errorMessage = "All provided URLs are either invalid, unsupported or failed to be scraped.";
+        const errorMessage =
+          "All provided URLs are either invalid, unsupported or failed to be scraped.";
         logger.error(errorMessage);
         const tokens_billed = 300 + calculateThinkingCost(costTracking);
         await billTeam(
@@ -865,7 +860,7 @@ export async function performExtraction(
           message: errorMessage,
           num_docs: 1,
           docs: [],
-          time_taken: (new Date().getTime() - Date.now()) / 1000,
+          time_taken: (new Date().getTime() - createdAt.getTime()) / 1000,
           team_id: teamId,
           mode: "extract",
           url: request.urls?.join(", ") || "",
@@ -976,11 +971,11 @@ export async function performExtraction(
 
     let finalResult = reqSchema
       ? await mixSchemaObjects(
-        reqSchema,
-        singleAnswerResult,
-        multiEntityResult,
-        logger.child({ method: "mixSchemaObjects" }),
-      )
+          reqSchema,
+          singleAnswerResult,
+          multiEntityResult,
+          logger.child({ method: "mixSchemaObjects" }),
+        )
       : singleAnswerResult || multiEntityResult;
 
     // Tokenize final result to get token count
@@ -1059,7 +1054,7 @@ export async function performExtraction(
       message: "Extract completed",
       num_docs: 1,
       docs: finalResult ?? {},
-      time_taken: (new Date().getTime() - Date.now()) / 1000,
+      time_taken: (new Date().getTime() - createdAt.getTime()) / 1000,
       team_id: teamId,
       mode: "extract",
       url: request.urls?.join(", ") || "",
@@ -1137,7 +1132,7 @@ export async function performExtraction(
             : "An unexpected error occurred",
       num_docs: 1,
       docs: [],
-      time_taken: (new Date().getTime() - Date.now()) / 1000,
+      time_taken: (new Date().getTime() - createdAt.getTime()) / 1000,
       team_id: teamId,
       mode: "extract",
       url: request.urls?.join(", ") || "",

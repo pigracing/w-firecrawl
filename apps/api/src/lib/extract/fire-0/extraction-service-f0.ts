@@ -39,7 +39,6 @@ import {
 } from "./usage/llm-cost-f0";
 import { SourceTracker_F0 } from "./helpers/source-tracker-f0";
 import { getACUCTeam } from "../../../controllers/auth";
-import { langfuse } from "../../../services/langfuse";
 
 interface ExtractServiceOptions {
   request: ExtractRequest;
@@ -48,6 +47,7 @@ interface ExtractServiceOptions {
   cacheMode?: "load" | "save" | "direct";
   cacheKey?: string;
   apiKeyId: number | null;
+  createdAt?: number;
 }
 
 interface ExtractResult {
@@ -76,6 +76,9 @@ export async function performExtraction_F0(
   options: ExtractServiceOptions,
 ): Promise<ExtractResult> {
   const { request, teamId, subId, apiKeyId } = options;
+  const createdAt = options.createdAt
+    ? new Date(options.createdAt)
+    : new Date();
   const urlTraces: URLTrace[] = [];
   let docsMap: Map<string, Document> = new Map();
   let singleAnswerCompletions: completions | null = null;
@@ -90,18 +93,9 @@ export async function performExtraction_F0(
   const logger = _logger.child({
     module: "extract",
     method: "performExtraction",
+    extractModel: "fire-0",
     extractId,
     teamId,
-  });
-
-  langfuse.trace({
-    id: "extract:" + extractId,
-    name: "performExtraction",
-    metadata: {
-      teamId,
-      extractId,
-      model: "fire-0",
-    },
   });
 
   // If no URLs are provided, generate URLs from the prompt
@@ -131,7 +125,7 @@ export async function performExtraction_F0(
       message: "No search results found",
       num_docs: 1,
       docs: [],
-      time_taken: (new Date().getTime() - Date.now()) / 1000,
+      time_taken: (new Date().getTime() - createdAt.getTime()) / 1000,
       team_id: teamId,
       mode: "extract",
       url: request.urls?.join(", ") || "",
@@ -239,7 +233,7 @@ export async function performExtraction_F0(
       message: "No valid URLs found to scrape",
       num_docs: 1,
       docs: [],
-      time_taken: (new Date().getTime() - Date.now()) / 1000,
+      time_taken: (new Date().getTime() - createdAt.getTime()) / 1000,
       team_id: teamId,
       mode: "extract",
       url: request.urls?.join(", ") || "",
@@ -615,7 +609,7 @@ export async function performExtraction_F0(
         message: "Failed to transform array to object",
         num_docs: 1,
         docs: [],
-        time_taken: (new Date().getTime() - Date.now()) / 1000,
+        time_taken: (new Date().getTime() - createdAt.getTime()) / 1000,
         team_id: teamId,
         mode: "extract",
         url: request.urls?.join(", ") || "",
@@ -713,7 +707,7 @@ export async function performExtraction_F0(
         message: "Failed to scrape documents",
         num_docs: 1,
         docs: [],
-        time_taken: (new Date().getTime() - Date.now()) / 1000,
+        time_taken: (new Date().getTime() - createdAt.getTime()) / 1000,
         team_id: teamId,
         mode: "extract",
         url: request.urls?.join(", ") || "",
@@ -743,7 +737,7 @@ export async function performExtraction_F0(
         message: "All provided URLs are invalid",
         num_docs: 1,
         docs: [],
-        time_taken: (new Date().getTime() - Date.now()) / 1000,
+        time_taken: (new Date().getTime() - createdAt.getTime()) / 1000,
         team_id: teamId,
         mode: "extract",
         url: request.urls?.join(", ") || "",
@@ -915,7 +909,7 @@ export async function performExtraction_F0(
     message: "Extract completed",
     num_docs: 1,
     docs: finalResult ?? {},
-    time_taken: (new Date().getTime() - Date.now()) / 1000,
+    time_taken: (new Date().getTime() - createdAt.getTime()) / 1000,
     team_id: teamId,
     mode: "extract",
     url: request.urls?.join(", ") || "",

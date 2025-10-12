@@ -243,6 +243,40 @@ export function countryCheck(
   next();
 }
 
+export function requestTimingMiddleware(version: string) {
+  return (req: Request, res: Response, next: NextFunction) => {
+    const startTime = new Date().getTime();
+    
+    // Attach timing data to request
+    (req as any).requestTiming = {
+      startTime,
+      version
+    };
+
+    // Override res.json to log timing when response is sent
+    const originalJson = res.json.bind(res);
+    res.json = function(body: any) {
+      const requestTime = new Date().getTime() - startTime;
+      
+      // Only log for successful responses to avoid duplicate error logs
+      if (body?.success !== false) {
+        logger.info(`${version} request completed`, {
+          version,
+          path: req.path,
+          method: req.method,
+          startTime,
+          requestTime,
+          statusCode: res.statusCode,
+        });
+      }
+      
+      return originalJson(body);
+    };
+
+    next();
+  };
+}
+
 export function wrap(
   controller: (req: Request, res: Response) => Promise<any>,
 ): (req: Request, res: Response, next: NextFunction) => any {

@@ -27,7 +27,7 @@ fn _get_pdf_metadata(path: &str) -> std::result::Result<PDFMetadata, String> {
       info
         .as_dict()
         .and_then(|info| info.get(b"Title"))
-        .and_then(|title| lopdf::decode_text_string(title))
+        .and_then(lopdf::decode_text_string)
     })
     .ok()
     .or_else(|| {
@@ -35,7 +35,7 @@ fn _get_pdf_metadata(path: &str) -> std::result::Result<PDFMetadata, String> {
         obj
           .as_dict()
           .and_then(|obj| obj.get(b"Title"))
-          .and_then(|title| lopdf::decode_text_string(title))
+          .and_then(lopdf::decode_text_string)
           .ok()
       })
     })
@@ -50,7 +50,7 @@ pub fn get_pdf_metadata(path: String) -> Result<PDFMetadata> {
   _get_pdf_metadata(&path).map_err(|e| {
     Error::new(
       Status::GenericFailure,
-      format!("Failed to get PDF metadata: {}", e),
+      format!("Failed to get PDF metadata: {e}"),
     )
   })
 }

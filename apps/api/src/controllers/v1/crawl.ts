@@ -7,7 +7,12 @@ import {
   RequestWithAuth,
   toLegacyCrawlerOptions,
 } from "./types";
-import { crawlToCrawler, saveCrawl, StoredCrawl } from "../../lib/crawl-redis";
+import {
+  crawlToCrawler,
+  saveCrawl,
+  StoredCrawl,
+  markCrawlActive,
+} from "../../lib/crawl-redis";
 import { _addScrapeJobToBullMQ } from "../../services/queue-jobs";
 import { logger as _logger } from "../../lib/logger";
 import { fromV1ScrapeOptions } from "../v2/types";
@@ -120,10 +125,10 @@ export async function crawlController(
 
   try {
     sc.robots = await crawler.getRobotsTxt(scrapeOptions.skipTlsVerification);
-    const robotsCrawlDelay = crawler.getRobotsCrawlDelay();
-    if (robotsCrawlDelay !== null && !sc.crawlerOptions.delay) {
-      sc.crawlerOptions.delay = robotsCrawlDelay;
-    }
+    // const robotsCrawlDelay = crawler.getRobotsCrawlDelay();
+    // if (robotsCrawlDelay !== null && !sc.crawlerOptions.delay) {
+    //   sc.crawlerOptions.delay = robotsCrawlDelay;
+    // }
   } catch (e) {
     logger.debug("Failed to get robots.txt (this is probably fine!)", {
       error: e,
@@ -132,10 +137,12 @@ export async function crawlController(
 
   await saveCrawl(id, sc);
 
+  await markCrawlActive(id);
+
   await _addScrapeJobToBullMQ(
     {
-      url: req.body.url,
       mode: "kickoff" as const,
+      url: req.body.url,
       team_id: req.auth.team_id,
       crawlerOptions,
       scrapeOptions: sc.scrapeOptions,

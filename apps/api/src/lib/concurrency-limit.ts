@@ -62,6 +62,7 @@ type ConcurrencyLimitedJob = {
   id: string;
   data: any;
   priority: number;
+  listenable: boolean;
 };
 
 export async function cleanOldConcurrencyLimitedJobs(
@@ -346,6 +347,7 @@ export async function concurrentJobDone(job: NuQJob<any>) {
             concurrencyLimitHit: true,
           },
           nextJob.job.priority,
+          nextJob.job.listenable,
         );
       }
     }

@@ -6,10 +6,20 @@ import { HTML_TO_MARKDOWN_PATH } from "./natives";
 import { createWriteStream } from "fs";
 
 const childProcesses = new Set<ChildProcess>();
+const stopping = new WeakSet<ChildProcess>(); // processes we're intentionally stopping
 
 interface ProcessResult {
   promise: Promise<void>;
   process: ChildProcess;
+}
+
+interface Services {
+  api?: ProcessResult;
+  worker?: ProcessResult;
+  nuqWorkers: ProcessResult[];
+  nuqPrefetchWorker?: ProcessResult;
+  indexWorker?: ProcessResult;
+  command?: ProcessResult;
 }
 
 const colors = {
@@ -29,20 +39,17 @@ const colors = {
 const processGroupColors: Record<string, string> = {
   api: colors.green,
   worker: colors.blue,
+  extract: colors.magenta,
   nuq: colors.cyan,
-  index: colors.magenta,
+  index: colors.yellow,
   go: colors.yellow,
   command: colors.white,
 };
 
 function getProcessGroup(name: string): string {
   let group = name;
-  if (name.includes("@")) {
-    group = name.split("@")[0];
-  }
-  if (name.includes("-")) {
-    group = name.split("-")[0];
-  }
+  if (name.includes("@")) group = name.split("@")[0];
+  if (name.includes("-")) group = name.split("-")[0];
   return group;
 }
 
@@ -53,13 +60,9 @@ function getProcessColor(name: string): string {
 
 function formatDuration(nanoseconds: bigint): string {
   const milliseconds = Number(nanoseconds) / 1e6;
-  if (milliseconds < 1000) {
-    return `${milliseconds.toFixed(0)}ms`;
-  }
+  if (milliseconds < 1000) return `${milliseconds.toFixed(0)}ms`;
   const seconds = milliseconds / 1000;
-  if (seconds < 60) {
-    return `${seconds.toFixed(1)}s`;
-  }
+  if (seconds < 60) return `${seconds.toFixed(1)}s`;
   const minutes = Math.floor(seconds / 60);
   const remainingSeconds = seconds - minutes * 60;
   return `${minutes}m ${remainingSeconds.toFixed(0)}s`;
@@ -67,36 +70,32 @@ function formatDuration(nanoseconds: bigint): string {
 
 const stream = createWriteStream("firecrawl.log");
 
+const PORT = process.env.PORT ?? "3002";
+
 const logger = {
   section(message: string) {
     console.log(
-      `\n${colors.bold}${colors.blue}━━ ${message} ━━${colors.reset}\n`,
+      `\n${colors.bold}${colors.blue}── ${message} ──${colors.reset}\n`,
     );
   },
-
   info(message: string) {
     console.log(message);
   },
-
   success(message: string) {
     console.log(`${colors.green}✓${colors.reset} ${message}`);
   },
-
   warn(message: string) {
     console.log(`${colors.yellow}!${colors.reset} ${message}`);
   },
-
   error(message: string) {
     console.error(`${colors.red}✗${colors.reset} ${message}`);
   },
-
   processStart(name: string, command: string) {
     const color = getProcessColor(name);
     console.log(
       `${color}>${colors.reset} ${color}${colors.bold}${name}${colors.reset} ${colors.dim}${command}${colors.reset}`,
     );
   },
-
   processEnd(name: string, exitCode: number | null, duration: bigint) {
     const color = getProcessColor(name);
     const symbol = exitCode === 0 ? "●" : "✗";
@@ -108,19 +107,20 @@ const logger = {
       `${symbolColor}${symbol}${colors.reset} ${color}${colors.bold}${name}${colors.reset} ${timing}${codeInfo}`,
     );
   },
-
-  processOutput(name: string, line: string) {
+  processOutput(name: string, line: string, isReduceNoise: boolean) {
     const color = getProcessColor(name);
-    const label = `${color}${name.padEnd(12)}${colors.reset}`;
-    console.log(`${label} ${line}`);
-    stream.write(`${name.padEnd(12)} ${line}\n`);
+    const label = `${color}${name.padEnd(14)}${colors.reset}`;
+    if (!(line.includes("[nuq/metrics:") && isReduceNoise)) {
+      console.log(`${label} ${line}`);
+    }
+    stream.write(`${name.padEnd(14)} ${line}\n`);
   },
 };
 
 function waitForPort(
   port: number,
   host: string,
-  timeoutMs = 10000,
+  timeoutMs = 30000,
 ): Promise<void> {
   return new Promise((resolve, reject) => {
     const timeout = setTimeout(() => {
@@ -156,19 +156,24 @@ function execForward(
 ): ProcessResult {
   let child: ChildProcess;
   let displayCommand = "";
+  const isWindows = process.platform === "win32";
+
+  const isReduceNoise = env.NUQ_REDUCE_NOISE === "true";
+  delete env.NUQ_REDUCE_NOISE;
 
   if (typeof command === "string") {
     displayCommand = command;
-    const isWindows = process.platform === "win32";
     if (isWindows) {
       child = spawn("cmd", ["/c", command], {
         env: { ...process.env, ...env },
         shell: false,
+        detached: false,
       });
     } else {
       child = spawn("sh", ["-c", command], {
         env: { ...process.env, ...env },
         shell: false,
+        detached: true,
       });
     }
   } else {
@@ -177,6 +182,7 @@ function execForward(
     child = spawn(cmd, args, {
       env: { ...process.env, ...env },
       shell: false,
+      detached: !isWindows,
     });
   }
 
@@ -197,16 +203,11 @@ function execForward(
       const remainingBuffer = lines[lines.length - 1];
 
       completeLines.forEach(line => {
-        if (line.trim()) {
-          logger.processOutput(name, line);
-        }
+        if (line.trim()) logger.processOutput(name, line, isReduceNoise);
       });
 
-      if (isError) {
-        stderrBuffer = remainingBuffer;
-      } else {
-        stdoutBuffer = remainingBuffer;
-      }
+      if (isError) stderrBuffer = remainingBuffer;
+      else stdoutBuffer = remainingBuffer;
     };
 
     child.stdout?.on("data", data => processOutput(data.toString(), false));
@@ -215,7 +216,8 @@ function execForward(
     child.on("close", code => {
       childProcesses.delete(child);
       logger.processEnd(name, code, process.hrtime.bigint() - startTime);
-      if (code !== 0) {
+      const wasStopping = stopping.has(child);
+      if (code !== 0 && !wasStopping) {
         reject(new Error(`${name} failed with exit code ${code}`));
       } else {
         resolve();
@@ -225,67 +227,64 @@ function execForward(
     child.on("error", error => {
       childProcesses.delete(child);
       logger.processEnd(name, -1, process.hrtime.bigint() - startTime);
-      reject(new Error(`${name} failed to start: ${error.message}`));
+      if (stopping.has(child)) resolve();
+      else reject(new Error(`${name} failed to start: ${error.message}`));
     });
   });
 
   return { promise, process: child };
 }
 
-function terminateProcess(proc: any): Promise<void> {
+function terminateProcess(proc: ChildProcess): Promise<void> {
   return new Promise(resolve => {
     if (!proc || proc.killed || proc.exitCode !== null) {
       resolve();
       return;
     }
 
+    stopping.add(proc);
+
     let resolved = false;
-    const resolveOnce = () => {
+    const cleanup = () => {
       if (!resolved) {
         resolved = true;
         resolve();
       }
     };
 
-    proc.on("close", resolveOnce);
-    proc.on("exit", resolveOnce);
-    proc.on("error", resolveOnce);
+    proc.once("exit", cleanup);
+    proc.once("error", cleanup);
 
-    try {
-      proc.kill("SIGTERM");
-    } catch {
-      resolveOnce();
-      return;
-    }
+    const isWindows = process.platform === "win32";
 
-    setTimeout(() => {
-      if (!proc.killed && proc.exitCode === null) {
-        try {
-          proc.kill("SIGKILL");
-        } catch {}
+    if (isWindows && proc.pid) {
+      const killer = spawn(
+        "taskkill",
+        ["/pid", proc.pid.toString(), "/t", "/f"],
+        {
+          stdio: "ignore",
+        },
+      );
+      killer.on("exit", cleanup);
+    } else if (proc.pid) {
+      try {
+        process.kill(-proc.pid, "SIGTERM");
+      } catch {
+        proc.kill("SIGTERM");
       }
-      resolveOnce();
-    }, 5000);
+    }
   });
 }
 
-let shuttingDown = false;
-async function gracefulShutdown() {
-  if (shuttingDown) return;
-  shuttingDown = true;
-
-  logger.section("Shutting down");
-  const terminationPromises = Array.from(childProcesses).map(terminateProcess);
-  await Promise.all(terminationPromises);
-  logger.success("All processes terminated");
-}
-
-async function buildDependencies() {
-  logger.section("Build");
+async function installDependencies() {
+  logger.section("Installing dependencies");
 
   const tasks = [
     (async () => {
-      if (process.argv[2] !== "--start-built") {
+      if (
+        process.argv[2] !== "--start-built" &&
+        process.argv[2] !== "--start-docker"
+      ) {
         logger.info("Installing API dependencies");
         const install = execForward("api@install", "pnpm install");
         await install.promise;
@@ -301,14 +300,14 @@ async function buildDependencies() {
     (async () => {
       logger.info("Installing Go dependencies");
       const install = execForward(
-        "go-html-to-md@install",
+        "go@install",
         "cd sharedLibs/go-html-to-md && go mod tidy",
       );
       await install.promise;
 
       logger.info("Building Go module");
       const build = execForward(
-        "go-html-to-md@build",
+        "go@build",
         `cd sharedLibs/go-html-to-md && go build -o ${basename(HTML_TO_MARKDOWN_PATH)} -buildmode=c-shared html-to-markdown.go`,
       );
       await build.promise;
@@ -316,85 +315,213 @@ async function buildDependencies() {
   ];
 
   await Promise.all(tasks);
-  logger.success("Build completed");
+  logger.success("Dependencies installed");
 }
 
-async function startServices() {
+function startServices(command?: string[]): Services {
   logger.section("Starting services");
 
   const api = execForward(
     "api",
     process.argv[2] === "--start-docker"
-      ? "node dist/src/index.js"
+      ? "node --import ./dist/src/otel.js dist/src/index.js"
       : "pnpm server:production:nobuild",
+    {
+      NUQ_REDUCE_NOISE: "true",
+      NUQ_POD_NAME: "api",
+    },
   );
 
   const worker = execForward(
     "worker",
     process.argv[2] === "--start-docker"
-      ? "node dist/src/services/queue-worker.js"
+      ? "node --import ./dist/src/otel.js dist/src/services/queue-worker.js"
       : "pnpm worker:production",
+    {
+      NUQ_REDUCE_NOISE: "true",
+      NUQ_POD_NAME: "worker",
+    },
+  );
+
+  const extractWorker = execForward(
+    "extract-worker",
+    process.argv[2] === "--start-docker"
+      ? "node --import ./dist/src/otel.js dist/src/services/extract-worker.js"
+      : "pnpm extract-worker:production",
+    {
+      NUQ_REDUCE_NOISE: "true",
+      NUQ_POD_NAME: "extract-worker",
+      NUQ_WORKER_PORT: String(3005),
+    },
   );
 
   const nuqWorkers = Array.from({ length: 5 }, (_, i) =>
     execForward(
       `nuq-worker-${i}`,
       process.argv[2] === "--start-docker"
-        ? "node dist/src/services/worker/nuq-worker.js"
+        ? "node --import ./dist/src/otel.js dist/src/services/worker/nuq-worker.js"
         : "pnpm nuq-worker:production",
       {
         NUQ_WORKER_PORT: String(3006 + i),
         NUQ_REDUCE_NOISE: "true",
+        NUQ_POD_NAME: `nuq-worker-${i}`,
       },
     ),
   );
+
+  const nuqPrefetchWorker = process.env.NUQ_RABBITMQ_URL
+    ? execForward(
+        "nuq-prefetch-worker",
+        process.argv[2] === "--start-docker"
+          ? "node --import ./dist/src/otel.js dist/src/services/worker/nuq-prefetch-worker.js"
+          : "pnpm nuq-prefetch-worker:production",
+        {
+          NUQ_PREFETCH_WORKER_PORT: String(3011),
+          NUQ_REDUCE_NOISE: "true",
+          NUQ_POD_NAME: "nuq-prefetch-worker",
+        },
+      )
+    : undefined;
 
   const indexWorker =
     process.env.USE_DB_AUTHENTICATION === "true"
       ? execForward(
           "index-worker",
           process.argv[2] === "--start-docker"
-            ? "node dist/src/services/indexing/index-worker.js"
+            ? "node --import ./dist/src/otel.js dist/src/services/indexing/index-worker.js"
             : "pnpm index-worker:production",
+          {
+            NUQ_REDUCE_NOISE: "true",
+            NUQ_POD_NAME: "index-worker",
+          },
         )
-      : null;
+      : undefined;
 
-  logger.info("Waiting for API on localhost:3002");
-  await waitForPort(3002, "localhost");
-  logger.success("API is ready");
+  const commandProcess =
+    command && !command?.[0].startsWith("--")
+      ? execForward("command", command)
+      : undefined;
 
   return {
-    api: api.promise,
-    worker: worker.promise,
-    nuqWorkers: nuqWorkers.map(w => w.promise),
-    indexWorker: indexWorker?.promise,
+    api,
+    worker,
+    nuqWorkers,
+    nuqPrefetchWorker,
+    indexWorker,
+    command: commandProcess,
   };
 }
 
-async function runCommand(command: string[], services: any) {
-  logger.section(`Running: ${command.join(" ")}`);
-  const cmd = execForward("command", command);
-  await Promise.race([
-    cmd.promise,
-    services.api,
-    services.worker,
-    ...services.nuqWorkers,
-    ...(services.indexWorker ? [services.indexWorker] : []),
-  ]);
+async function stopServices(services: Services) {
+  const stopPromises = [
+    services.api && terminateProcess(services.api.process),
+    services.worker && terminateProcess(services.worker.process),
+    ...services.nuqWorkers.map(w => terminateProcess(w.process)),
+    services.nuqPrefetchWorker &&
+      terminateProcess(services.nuqPrefetchWorker.process),
+    services.indexWorker && terminateProcess(services.indexWorker.process),
+    services.command && terminateProcess(services.command.process),
+  ].filter(Boolean);
+
+  await Promise.all(stopPromises);
 }
 
-async function waitForTermination(services: any) {
+async function runDevMode(): Promise<void> {
+  let currentServices: Services | null = null;
+  let isFirstStart = true;
+
+  const { TscWatchClient } = await import("tsc-watch");
+
+  const watch = new TscWatchClient();
+
+  watch.on("started", () => {
+    logger.info("TypeScript compilation started");
+  });
+
+  watch.on("first_success", async () => {
+    logger.success("Initial compilation complete");
+
+    currentServices = startServices();
+
+    logger.info(`Waiting for API on localhost:${PORT}`);
+    await waitForPort(Number(PORT), "localhost");
+    logger.success("API is ready");
+
+    isFirstStart = false;
+  });
+
+  watch.on("success", async () => {
+    if (!isFirstStart && currentServices) {
+      logger.info("Recompilation complete - restarting services");
+
+      await stopServices(currentServices);
+      logger.info("Services stopped");
+
+      currentServices = startServices();
+
+      await waitForPort(Number(PORT), "localhost");
+      logger.success("Services restarted");
+    }
+  });
+
+  watch.on("compile_errors", () => {
+    logger.error("Compilation failed - services not restarted");
+  });
+
+  logger.section("Starting development mode");
+  watch.start("--project", ".");
+
+  await new Promise<void>(resolve => {
+    process.on("SIGINT", resolve);
+    process.on("SIGTERM", resolve);
+  });
+
+  if (currentServices) {
+    await stopServices(currentServices);
+  }
+  watch.kill();
+}
+
+async function runProductionMode(command: string[]): Promise<void> {
+  const services = startServices(command);
+
+  logger.info(`Waiting for API on localhost:${PORT}`);
+  await waitForPort(Number(PORT), "localhost");
+
+  await waitForTermination(services);
+}
+
+async function waitForTermination(services: Services): Promise<void> {
   logger.info("All services running. Press Ctrl+C to stop");
-  await Promise.race([
+
+  const promises: Promise<void>[] = [
     new Promise<void>(resolve => {
       process.on("SIGINT", resolve);
       process.on("SIGTERM", resolve);
     }),
-    services.api,
-    services.worker,
-    ...services.nuqWorkers,
-    ...(services.indexWorker ? [services.indexWorker] : []),
-  ]);
+  ];
+
+  if (services.command) promises.push(services.command.promise);
+  if (services.api) promises.push(services.api.promise);
+  if (services.worker) promises.push(services.worker.promise);
+  if (services.indexWorker) promises.push(services.indexWorker.promise);
+  if (services.nuqPrefetchWorker)
+    promises.push(services.nuqPrefetchWorker.promise);
+
+  promises.push(...services.nuqWorkers.map(w => w.promise));
+
+  await Promise.race(promises);
+}
+
+let shuttingDown = false;
+async function gracefulShutdown() {
+  if (shuttingDown) return;
+  shuttingDown = true;
+
+  logger.section("Shutting down");
+  const terminationPromises = Array.from(childProcesses).map(terminateProcess);
+  await Promise.all(terminationPromises);
+  logger.success("All processes terminated");
 }
 
 function printUsage() {
@@ -402,13 +529,11 @@ function printUsage() {
     `${colors.bold}Usage:${colors.reset} pnpm harness <command...>\n`,
   );
   console.error(`${colors.bold}Special commands:${colors.reset}`);
-  console.error(`  --start        Start services and wait for termination`);
-  console.error(`  --start-built  Start services without rebuilding`);
-  console.error(`  --start-docker Start services (skip build completely)\n`);
   console.error(
-    `The harness ensures dependencies are installed, everything is built,`,
+    `  --start        Start in development mode (auto-restart on changes)`,
   );
-  console.error(`and services are running before executing your command.`);
+  console.error(`  --start-built  Start services without rebuilding`);
+  console.error(`  --start-docker Start services (skip install, assume built)`);
 }
 
 async function main() {
@@ -422,22 +547,16 @@ async function main() {
     }
 
     const command = process.argv.slice(2);
-    const isStartCommand = [
-      "--start",
-      "--start-built",
-      "--start-docker",
-    ].includes(command[0]);
+    const isDev = command[0] === "--start";
 
     if (command[0] !== "--start-docker") {
-      await buildDependencies();
+      await installDependencies();
     }
 
-    const services = await startServices();
-
-    if (isStartCommand) {
-      await waitForTermination(services);
+    if (isDev) {
+      await runDevMode();
     } else {
-      await runCommand(command, services);
+      await runProductionMode(command);
     }
   } catch (error: any) {
     logger.error("Fatal error occurred");

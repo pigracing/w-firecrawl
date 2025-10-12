@@ -92,7 +92,10 @@ async function crawlStatusWS(
       ])
     ).map(x => x.id);
 
-    const newlyDoneJobs: PseudoJob<any>[] = await getJobs(newlyDoneJobIDs);
+    const newlyDoneJobs: PseudoJob<any>[] = await getJobs(
+      newlyDoneJobIDs,
+      logger,
+    );
 
     for (const job of newlyDoneJobs) {
       if (job.returnvalue) {
@@ -145,7 +148,7 @@ async function crawlStatusWS(
 
   jobIDs = validJobIDs; // Use validJobIDs instead of jobIDs for further processing
 
-  const doneJobs = await getJobs(doneJobIDs);
+  const doneJobs = await getJobs(doneJobIDs, logger);
   const data = doneJobs.map(x => x.returnvalue);
 
   await send(ws, {
